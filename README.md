@@ -36,6 +36,18 @@ plot_bump(kospi_marketcap_ranking_df, 30, "Kospi Market Cap")
 ```
 <img width="740" alt="cap" src="https://user-images.githubusercontent.com/44548828/192274299-d93d6a54-ea17-42e6-835e-7a082cac9f8b.png">
 
+**Market capitalization trend by industry**
+
+```
+fig = plt.figure(figsize=(20, 12))
+ax = plt.subplot(111)
+pd.DataFrame(data).plot.bar(stacked=True, ax=ax, color=colors)
+ax.legend(loc='center left',  bbox_to_anchor=(1, 0.5), fancybox=True, shadow=True)
+plt.show()
+```
+
+<img width="740" alt="captrend" src="https://user-images.githubusercontent.com/44548828/192284053-1ef52f39-880d-4096-957a-2dfdeec4b536.png">
+
 **News Word Cloud**
 ```
 analyser = Analyser(df)
