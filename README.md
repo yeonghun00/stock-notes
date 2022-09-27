@@ -13,6 +13,7 @@ This is a collection of Jupyter notebooks used for stock and stock market analys
 <img width="740" alt="스크린샷 2022-09-26 오후 9 09 21" src="https://user-images.githubusercontent.com/44548828/192272670-3650ece8-9f17-42fd-a385-16f789616912.png">
 
 
+
 # Analysis
 
 **Risk Measure**
@@ -26,6 +27,8 @@ subplot_fundamental(['pbr', 'per', 'roe', 'eps'])
 ```
 
 <img width="740" alt="스크린샷 2022-09-26 오후 9 34 06" src="https://user-images.githubusercontent.com/44548828/192277343-64ab0e98-8ccf-4cc4-9b77-3d0387d88295.png">
+
+Run with a single click to analyze fundamental data trends, correlation heat maps, and risk measures such as the Sharpe ratio, Treynor ratio, and others.
 
 # Visualization
 
@@ -55,3 +58,4 @@ analyser.get_wordcloud('Text')
 ```
 <img width="740" alt="cap" src="https://user-images.githubusercontent.com/44548828/192278285-18ba7ba6-962f-49bb-befe-5719c812fa3d.png">
 
+Bump chart for market capitalization ranking change, stacked bar chart for market capitalization change in industry, and news word cloud.
