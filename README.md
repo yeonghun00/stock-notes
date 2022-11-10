@@ -63,5 +63,3 @@ analyser = Analyser(df)
 analyser.get_wordcloud('Text')
 ```
 <img width="740" alt="cap" src="https://user-images.githubusercontent.com/44548828/192278285-18ba7ba6-962f-49bb-befe-5719c812fa3d.png">
-
-Bump chart for market capitalization ranking change, stacked bar chart for market capitalization change in industry, and news word cloud.
