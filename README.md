@@ -30,6 +30,12 @@ subplot_fundamental(['pbr', 'per', 'roe', 'eps'])
 
 Run with a single click to analyze fundamental data trends, correlation heat maps, and risk measures such as the Sharpe ratio, Treynor ratio, and others.
 
+**Monte Carlo Simulation**
+
+<img width="740" alt="스크린샷 2022-11-10 오후 6 51 17" src="https://user-images.githubusercontent.com/44548828/201058979-76785080-0282-44c0-9d2a-f5a6c6f82fb3.png">
+
+<img width="740" alt="스크린샷 2022-11-10 오후 6 51 23" src="https://user-images.githubusercontent.com/44548828/201059025-8c1fd59d-aa30-45e2-a146-f81c43245309.png">
+
 # Visualization
 
 **Market Capitalization Ranking Trend**
