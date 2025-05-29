@@ -188,36 +188,89 @@ def customer_behavior_clustering(df, event_date):
             pre_foreign_pct = (pre_foreign / pre_total * 100) if pre_total > 0 else 0
             post_foreign_pct = (post_foreign / post_total * 100) if post_total > 0 else 0
             
+            # Calculate absolute changes for better clustering
+            foreign_abs_change = abs(post_foreign_pct - pre_foreign_pct)
+            volume_abs_change = abs((post_total - pre_total) / pre_total * 100) if pre_total > 0 else 0
+            
             customer_metrics.append({
                 'Customer': customer,
                 'Pre_Foreign_%': pre_foreign_pct,
                 'Post_Foreign_%': post_foreign_pct,
                 'Foreign_Change_%': post_foreign_pct - pre_foreign_pct,
                 'Volume_Change_%': ((post_total - pre_total) / pre_total * 100) if pre_total > 0 else 0,
+                'Foreign_Abs_Change_%': foreign_abs_change,
+                'Volume_Abs_Change_%': volume_abs_change,
                 'Pre_Trade_Count': len(pre_data),
-                'Post_Trade_Count': len(post_data)
+                'Post_Trade_Count': len(post_data),
+                'Total_Amount': pre_total + post_total
             })
     
     customer_df = pd.DataFrame(customer_metrics)
     
-    # Perform clustering
-    features = ['Foreign_Change_%', 'Volume_Change_%']
-    X = customer_df[features].fillna(0)
+    # Filter out customers with minimal changes (less than 5% in both dimensions)
+    significant_customers = customer_df[
+        (customer_df['Foreign_Abs_Change_%'] > 5) | 
+        (customer_df['Volume_Abs_Change_%'] > 10)
+    ].copy()
     
+    # If too few customers show significant changes, use all customers but different clustering
+    if len(significant_customers) < 50:
+        print(f"Warning: Only {len(significant_customers)} customers show significant changes")
+        significant_customers = customer_df.copy()
+    
+    # Perform clustering on significant customers
+    features = ['Foreign_Change_%', 'Volume_Change_%']
+    X = significant_customers[features].fillna(0)
+    
+    # Use better clustering parameters
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    kmeans = KMeans(n_clusters=4, random_state=42)
-    customer_df['Cluster'] = kmeans.fit_predict(X_scaled)
+    # Determine optimal number of clusters using elbow method
+    n_clusters = min(4, max(2, len(significant_customers) // 50))
     
-    # Name clusters based on behavior
-    cluster_names = {
-        0: 'Stable Investors',
-        1: 'Foreign Reducers',
-        2: 'Volume Increasers',
-        3: 'Portfolio Rebalancers'
-    }
-    customer_df['Cluster_Name'] = customer_df['Cluster'].map(cluster_names)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    significant_customers['Cluster'] = kmeans.fit_predict(X_scaled)
+    
+    # Name clusters based on actual behavior patterns
+    cluster_centers = pd.DataFrame(
+        scaler.inverse_transform(kmeans.cluster_centers_), 
+        columns=features
+    )
+    
+    # Dynamic cluster naming based on actual patterns
+    cluster_names = {}
+    for i in range(n_clusters):
+        foreign_change = cluster_centers.iloc[i]['Foreign_Change_%']
+        volume_change = cluster_centers.iloc[i]['Volume_Change_%']
+        
+        if abs(foreign_change) < 5 and abs(volume_change) < 10:
+            cluster_names[i] = 'Stable Investors'
+        elif foreign_change < -10:
+            cluster_names[i] = 'Foreign Reducers'
+        elif foreign_change > 10:
+            cluster_names[i] = 'Foreign Increasers'
+        elif volume_change > 20:
+            cluster_names[i] = 'Volume Increasers'
+        elif volume_change < -20:
+            cluster_names[i] = 'Volume Reducers'
+        else:
+            cluster_names[i] = 'Moderate Adjusters'
+    
+    significant_customers['Cluster_Name'] = significant_customers['Cluster'].map(cluster_names)
+    
+    # Add back the stable customers if they were filtered out
+    if len(significant_customers) < len(customer_df):
+        stable_customers = customer_df[
+            (customer_df['Foreign_Abs_Change_%'] <= 5) & 
+            (customer_df['Volume_Abs_Change_%'] <= 10)
+        ].copy()
+        stable_customers['Cluster'] = -1
+        stable_customers['Cluster_Name'] = 'Stable Investors'
+        
+        customer_df = pd.concat([significant_customers, stable_customers], ignore_index=True)
+    else:
+        customer_df = significant_customers
     
     return customer_df
 
@@ -258,10 +311,17 @@ def statistical_significance_tests(df, event_date, window=30):
     pre_counts = [pre_security.get(s, 0) for s in all_securities]
     post_counts = [post_security.get(s, 0) for s in all_securities]
     
-    chi2, p_chi = stats.chisquare(post_counts, pre_counts)
-    results['Security_Distribution'] = {
-        'chi2_statistic': chi2,
-        'p_value': p_chi
+    # Alternative Method 2: Use contingency table approach
+    # This tests independence between period and security type
+    contingency_table = pd.crosstab(
+        df.loc[df['Date'].isin(pd.concat([pre_data['Date'], post_data['Date']])), 'Period'],
+        df.loc[df['Date'].isin(pd.concat([pre_data['Date'], post_data['Date']])), 'Security_Type']
+    )
+    chi2_alt, p_chi_alt, dof, expected = stats.chi2_contingency(contingency_table)
+    results['Security_Distribution_Alt'] = {
+        'chi2_statistic': chi2_alt,
+        'p_value': p_chi_alt,
+        'degrees_of_freedom': dof
     }
     
     # 3. Wilcoxon signed-rank test for paired customer data
@@ -409,33 +469,58 @@ def create_customer_clustering_plot(customer_df):
     plt.tight_layout()
     return fig
 
-def create_industry_heatmap(df, event_date):
-    """Create industry impact heatmap"""
+def create_industry_heatmap(df, event_date, top_n=10):
+    """Create industry impact heatmap for top industries and security types"""
     event_date = pd.Timestamp(event_date)
     
     # Calculate change by industry and security type
     pre_data = df[df['Date'] < event_date]
     post_data = df[df['Date'] >= event_date]
     
-    # Create pivot tables
-    pre_pivot = pre_data.pivot_table(values='Amount', 
-                                     index='Customer_Industry', 
-                                     columns='Security_Type', 
-                                     aggfunc='sum', fill_value=0)
+    # Get top industries by total trading volume
+    industry_volume = df.groupby('Customer_Industry')['Amount'].sum().sort_values(ascending=False)
+    top_industries = industry_volume.head(top_n).index.tolist()
     
-    post_pivot = post_data.pivot_table(values='Amount', 
-                                      index='Customer_Industry', 
-                                      columns='Security_Type', 
-                                      aggfunc='sum', fill_value=0)
+    # Get top security types by total trading volume
+    security_volume = df.groupby('Security_Type')['Amount'].sum().sort_values(ascending=False)
+    top_securities = security_volume.head(top_n).index.tolist()
+    
+    # Filter data for top industries and securities
+    pre_filtered = pre_data[
+        (pre_data['Customer_Industry'].isin(top_industries)) & 
+        (pre_data['Security_Type'].isin(top_securities))
+    ]
+    post_filtered = post_data[
+        (post_data['Customer_Industry'].isin(top_industries)) & 
+        (post_data['Security_Type'].isin(top_securities))
+    ]
+    
+    # Create pivot tables
+    pre_pivot = pre_filtered.pivot_table(values='Amount', 
+                                         index='Customer_Industry', 
+                                         columns='Security_Type', 
+                                         aggfunc='sum', fill_value=0)
+    
+    post_pivot = post_filtered.pivot_table(values='Amount', 
+                                          index='Customer_Industry', 
+                                          columns='Security_Type', 
+                                          aggfunc='sum', fill_value=0)
+    
+    # Ensure same shape
+    all_industries = sorted(list(set(pre_pivot.index) | set(post_pivot.index)))
+    all_securities = sorted(list(set(pre_pivot.columns) | set(post_pivot.columns)))
+    
+    pre_pivot = pre_pivot.reindex(index=all_industries, columns=all_securities, fill_value=0)
+    post_pivot = post_pivot.reindex(index=all_industries, columns=all_securities, fill_value=0)
     
     # Calculate percentage change
-    change_pivot = ((post_pivot - pre_pivot) / pre_pivot * 100).round(1)
+    change_pivot = ((post_pivot - pre_pivot) / pre_pivot * 100).replace([np.inf, -np.inf], 0).fillna(0).round(1)
     
     # Create heatmap
     plt.figure(figsize=(12, 8))
     sns.heatmap(change_pivot, annot=True, fmt='.1f', cmap='RdYlGn', center=0,
-                cbar_kws={'label': '% Change'})
-    plt.title('Industry-wise Security Type Trading Change (%)')
+                cbar_kws={'label': '% Change'}, vmin=-100, vmax=100)
+    plt.title(f'Top {top_n} Industries & Security Types - Trading Change (%)')
     plt.xlabel('Security Type')
     plt.ylabel('Industry')
     plt.tight_layout()
@@ -488,6 +573,12 @@ print("\nSecurity Distribution Test:")
 print(f"  Chi-square statistic: {stat_results['Security_Distribution']['chi2_statistic']:.3f}")
 print(f"  P-value: {stat_results['Security_Distribution']['p_value']:.4f}")
 
+if 'Security_Distribution_Alt' in stat_results:
+    print("\nSecurity Distribution Test (Contingency Table):")
+    print(f"  Chi-square statistic: {stat_results['Security_Distribution_Alt']['chi2_statistic']:.3f}")
+    print(f"  P-value: {stat_results['Security_Distribution_Alt']['p_value']:.4f}")
+    print(f"  Degrees of freedom: {stat_results['Security_Distribution_Alt']['degrees_of_freedom']}")
+
 if 'Customer_Behavior' in stat_results:
     print("\nCustomer Behavior Test (Wilcoxon):")
     print(f"  Number of customers: {stat_results['Customer_Behavior']['n_customers']}")
@@ -539,37 +630,55 @@ daily_metrics = df.groupby('Date').agg({
     'Net_Amount': 'sum'
 }).reset_index()
 
-# Calculate rolling averages
-daily_metrics['MA_7'] = daily_metrics['Amount'].rolling(window=7).mean()
-daily_metrics['MA_30'] = daily_metrics['Amount'].rolling(window=30).mean()
+# Remove outliers using IQR method
+Q1 = daily_metrics['Amount'].quantile(0.25)
+Q3 = daily_metrics['Amount'].quantile(0.75)
+IQR = Q3 - Q1
+lower_bound = Q1 - 1.5 * IQR
+upper_bound = Q3 + 1.5 * IQR
+
+# Mark outliers but don't remove them completely - cap them
+daily_metrics['Amount_cleaned'] = daily_metrics['Amount'].clip(lower=lower_bound, upper=upper_bound)
+daily_metrics['Net_Amount_cleaned'] = daily_metrics['Net_Amount'].clip(
+    lower=daily_metrics['Net_Amount'].quantile(0.05),
+    upper=daily_metrics['Net_Amount'].quantile(0.95)
+)
+
+# Calculate rolling averages on cleaned data
+daily_metrics['MA_7'] = daily_metrics['Amount_cleaned'].rolling(window=7, center=True).mean()
+daily_metrics['MA_30'] = daily_metrics['Amount_cleaned'].rolling(window=30, center=True).mean()
 
 # Plot time series with events marked
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
 
 # Trading volume
-ax1.plot(daily_metrics['Date'], daily_metrics['Amount']/1e6, alpha=0.3, label='Daily')
-ax1.plot(daily_metrics['Date'], daily_metrics['MA_7']/1e6, label='7-day MA')
-ax1.plot(daily_metrics['Date'], daily_metrics['MA_30']/1e6, label='30-day MA')
-ax1.axvline(x=trump_date, color='red', linestyle='--', label='Trump Inauguration')
-ax1.axvline(x=apr_event, color='orange', linestyle='--', label='April Event')
+ax1.plot(daily_metrics['Date'], daily_metrics['Amount_cleaned']/1e6, alpha=0.3, label='Daily (outliers capped)', linewidth=0.5)
+ax1.plot(daily_metrics['Date'], daily_metrics['MA_7']/1e6, label='7-day MA', linewidth=2)
+ax1.plot(daily_metrics['Date'], daily_metrics['MA_30']/1e6, label='30-day MA', linewidth=2)
+ax1.axvline(x=trump_date, color='red', linestyle='--', label='Trump Inauguration', linewidth=2)
+ax1.axvline(x=apr_event, color='orange', linestyle='--', label='April Event', linewidth=2)
 ax1.set_ylabel('Trading Volume (Million $)')
-ax1.set_title('Trading Volume Time Series')
+ax1.set_title('Trading Volume Time Series (Outliers Capped at 1.5 IQR)')
 ax1.legend()
 ax1.grid(True, alpha=0.3)
 
 # Net position
-ax2.plot(daily_metrics['Date'], daily_metrics['Net_Amount']/1e6, alpha=0.5)
-ax2.axvline(x=trump_date, color='red', linestyle='--')
-ax2.axvline(x=apr_event, color='orange', linestyle='--')
+ax2.plot(daily_metrics['Date'], daily_metrics['Net_Amount_cleaned']/1e6, alpha=0.5, linewidth=1)
+ax2.axvline(x=trump_date, color='red', linestyle='--', linewidth=2)
+ax2.axvline(x=apr_event, color='orange', linestyle='--', linewidth=2)
 ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
 ax2.set_xlabel('Date')
 ax2.set_ylabel('Net Position (Million $)')
-ax2.set_title('Daily Net Trading Position (Buy - Sell)')
+ax2.set_title('Daily Net Trading Position (Buy - Sell) - 5th to 95th Percentile')
 ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.savefig('time_series_analysis.png', dpi=300, bbox_inches='tight')
 plt.close()
+
+# Report outliers found
+n_outliers = len(daily_metrics[(daily_metrics['Amount'] < lower_bound) | (daily_metrics['Amount'] > upper_bound)])
+print(f"\nOutliers detected and capped: {n_outliers} days out of {len(daily_metrics)}")
 
 # 7. Recommendation Matrix
 print("\n7. ACTIONABLE INSIGHTS FOR RMs")
