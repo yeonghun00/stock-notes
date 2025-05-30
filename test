@@ -1,102 +1,3 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime, timedelta
-import warnings
-from scipy import stats
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-warnings.filterwarnings('ignore')
-
-# Set style
-plt.style.use('seaborn-v0_8-darkgrid')
-sns.set_palette("husl")
-
-# ==================== DATA GENERATION ====================
-# Simulating realistic banking trade data
-np.random.seed(42)
-
-# Generate date range
-start_date = '2023-01-01'
-end_date = '2025-05-29'
-dates = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days only
-
-# Key events
-trump_date = pd.Timestamp('2025-01-20')
-apr_event = pd.Timestamp('2025-04-02')
-
-# Customer and security setup
-n_customers = 500
-customers = [f'Customer_{i:03d}' for i in range(n_customers)]
-industries = ['Technology', 'Manufacturing', 'Finance', 'Retail', 'Healthcare', 
-              'Energy', 'Real Estate', 'Consumer Goods']
-security_types = ['Foreign Stocks', 'Local Stocks', 'Bonds', 'Certificate of Deposit', 
-                  'Unit Trusts', 'ETFs']
-
-# Generate trades
-trades = []
-for date in dates:
-    # Adjust trading patterns based on events
-    if date >= trump_date:
-        foreign_bias = 0.3  # Reduced foreign investment
-        volume_multiplier = 1.2  # Increased trading volume
-    else:
-        foreign_bias = 0.5
-        volume_multiplier = 1.0
-    
-    # Daily trades (varying by day)
-    n_trades = np.random.poisson(200 * volume_multiplier)
-    
-    for _ in range(n_trades):
-        customer = np.random.choice(customers)
-        industry = np.random.choice(industries)
-        
-        # Bias security selection based on period
-        if date >= trump_date:
-            security_probs = [foreign_bias, 1-foreign_bias, 0.1, 0.05, 0.05, 0.05]
-        else:
-            security_probs = [0.4, 0.4, 0.1, 0.05, 0.03, 0.02]
-        
-        security_probs = np.array(security_probs) / sum(security_probs)
-        security_type = np.random.choice(security_types, p=security_probs)
-        
-        # Generate trade details
-        investment = np.random.choice(['Buy', 'Sell'], p=[0.55, 0.45])
-        amount = np.random.lognormal(10, 1.5) * 1000  # Log-normal distribution for amounts
-        
-        trades.append({
-            'Date': date,
-            'Customer_Name': customer,
-            'Customer_Industry': industry,
-            'Investment': investment,
-            'Amount': amount,
-            'Security_Type': security_type
-        })
-
-# Create DataFrame
-df = pd.DataFrame(trades)
-print(f"Generated {len(df)} trades from {df['Date'].min()} to {df['Date'].max()}")
-
-# ==================== DATA PREPROCESSING ====================
-
-# Add derived features
-df['Year'] = df['Date'].dt.year
-df['Month'] = df['Date'].dt.month
-df['Week'] = df['Date'].dt.isocalendar().week
-df['DayOfWeek'] = df['Date'].dt.dayofweek
-
-# Define periods
-df['Period'] = 'Pre-Trump'
-df.loc[df['Date'] >= trump_date, 'Period'] = 'Post-Trump'
-df.loc[df['Date'] >= apr_event, 'Period'] = 'Post-April'
-
-# Create net position (Buy - Sell)
-df['Net_Amount'] = df.apply(lambda x: x['Amount'] if x['Investment'] == 'Buy' else -x['Amount'], axis=1)
-
 # ==================== ANALYSIS FUNCTIONS ====================
 
 def calculate_trading_metrics(data, groupby_cols=['Date']):
@@ -310,6 +211,18 @@ def statistical_significance_tests(df, event_date, window=30):
     all_securities = list(set(pre_security.index) | set(post_security.index))
     pre_counts = [pre_security.get(s, 0) for s in all_securities]
     post_counts = [post_security.get(s, 0) for s in all_securities]
+    
+    # Method 1: Scale expected frequencies to match observed total
+    # This maintains the pre-period distribution but scales to post-period total
+    post_total = sum(post_counts)
+    pre_total = sum(pre_counts)
+    expected_counts = [count * post_total / pre_total for count in pre_counts]
+    
+    chi2, p_chi = stats.chisquare(post_counts, expected_counts)
+    results['Security_Distribution'] = {
+        'chi2_statistic': chi2,
+        'p_value': p_chi
+    }
     
     # Alternative Method 2: Use contingency table approach
     # This tests independence between period and security type
@@ -611,14 +524,24 @@ industry_fig = create_industry_heatmap(df, trump_date)
 plt.savefig('industry_heatmap.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-# Industry ranking by impact
+# Industry ranking by impact with customer count filter
+industry_customers = df.groupby('Customer_Industry')['Customer_Name'].nunique()
 industry_impact = df.groupby(['Customer_Industry', 'Period'])['Amount'].sum().unstack()
+
+# Add customer count
+industry_impact['Customer_Count'] = industry_customers
 industry_impact['Change_%'] = ((industry_impact['Post-Trump'] - industry_impact['Pre-Trump']) / 
                                industry_impact['Pre-Trump'] * 100).round(2)
-industry_ranking = industry_impact.sort_values('Change_%', ascending=False)
 
-print("\nIndustry Impact Ranking:")
-print(industry_ranking[['Change_%']].head(10))
+# Filter industries with at least 10 customers
+significant_industries = industry_impact[industry_impact['Customer_Count'] >= 10]
+industry_ranking = significant_industries.sort_values('Change_%', ascending=False)
+
+print("\nIndustry Impact Ranking (Industries with 10+ customers):")
+print("\nTop 10 Increasers:")
+print(industry_ranking[['Change_%', 'Customer_Count']].head(10))
+print("\nTop 10 Decreasers:")
+print(industry_ranking[['Change_%', 'Customer_Count']].tail(10))
 
 # 6. Time Series Decomposition
 print("\n6. TIME SERIES PATTERNS")
@@ -680,27 +603,69 @@ plt.close()
 n_outliers = len(daily_metrics[(daily_metrics['Amount'] < lower_bound) | (daily_metrics['Amount'] > upper_bound)])
 print(f"\nOutliers detected and capped: {n_outliers} days out of {len(daily_metrics)}")
 
-# 7. Recommendation Matrix
+# 7. Recommendation Matrix - Fixed version
 print("\n7. ACTIONABLE INSIGHTS FOR RMs")
 print("-" * 40)
 
-# Identify high-opportunity customers
-opportunity_customers = customer_clusters[
-    (customer_clusters['Foreign_Change_%'] < -10) & 
-    (customer_clusters['Volume_Change_%'] > 20)
-].sort_values('Volume_Change_%', ascending=False).head(20)
+# Calculate proper foreign/local exposure changes
+customer_exposure = []
+for customer in df['Customer_Name'].unique():
+    cust_data = df[df['Customer_Name'] == customer]
+    pre_data = cust_data[cust_data['Date'] < trump_date]
+    post_data = cust_data[cust_data['Date'] >= trump_date]
+    
+    if len(pre_data) > 0 and len(post_data) > 0:
+        # Foreign exposure
+        pre_foreign = pre_data[pre_data['Security_Type'].str.contains('Foreign', case=False, na=False)]['Amount'].sum()
+        post_foreign = post_data[post_data['Security_Type'].str.contains('Foreign', case=False, na=False)]['Amount'].sum()
+        
+        # Local (HK) exposure
+        pre_local = pre_data[pre_data['Security_Type'].str.contains('Local|HK|Hong Kong', case=False, na=False)]['Amount'].sum()
+        post_local = post_data[post_data['Security_Type'].str.contains('Local|HK|Hong Kong', case=False, na=False)]['Amount'].sum()
+        
+        pre_total = pre_data['Amount'].sum()
+        post_total = post_data['Amount'].sum()
+        
+        if pre_total > 0 and post_total > 0:
+            customer_exposure.append({
+                'Customer': customer,
+                'Foreign_Exposure_Change': (post_foreign/post_total - pre_foreign/pre_total) * 100,
+                'Local_Exposure_Change': (post_local/post_total - pre_local/pre_total) * 100,
+                'Volume_Change_%': ((post_total - pre_total) / pre_total * 100),
+                'Pre_Total': pre_total,
+                'Post_Total': post_total
+            })
+
+exposure_df = pd.DataFrame(customer_exposure)
+
+# Identify different customer segments
+foreign_reducers = exposure_df[exposure_df['Foreign_Exposure_Change'] < -10]
+local_reducers = exposure_df[exposure_df['Local_Exposure_Change'] < -10]
+volume_increasers = exposure_df[exposure_df['Volume_Change_%'] > 50]
+
+print(f"\nCustomers who reduced foreign exposure by >10%: {len(foreign_reducers)}")
+print(f"Customers who reduced local (HK) exposure by >10%: {len(local_reducers)}")
+print(f"Customers who increased trading volume by >50%: {len(volume_increasers)}")
+
+# High opportunity customers - those who changed behavior significantly
+opportunity_customers = exposure_df[
+    (abs(exposure_df['Foreign_Exposure_Change']) > 10) | 
+    (abs(exposure_df['Local_Exposure_Change']) > 10) |
+    (abs(exposure_df['Volume_Change_%']) > 50)
+].sort_values('Post_Total', ascending=False).head(20)
 
 print(f"\nHigh-Priority Customers for RM Outreach: {len(opportunity_customers)}")
-print("These customers significantly reduced foreign exposure and increased trading activity")
 
-# Create final summary statistics
+# Create final summary statistics with corrected calculations
 summary_stats = {
-    'Total Customers Analyzed': len(customer_clusters),
-    'Customers with Reduced Foreign Exposure': len(customer_clusters[customer_clusters['Foreign_Change_%'] < 0]),
-    'Customers with Increased Trading Volume': len(customer_clusters[customer_clusters['Volume_Change_%'] > 0]),
-    'Average Foreign Stock Reduction': f"{customer_clusters['Foreign_Change_%'].mean():.1f}%",
-    'Average Volume Increase': f"{customer_clusters['Volume_Change_%'].mean():.1f}%",
-    'Statistical Significance': 'Yes' if stat_results['Volume_Change']['p_value'] < 0.05 else 'No'
+    'Total Customers Analyzed': len(exposure_df),
+    'Customers with Reduced Foreign Exposure (>10%)': len(foreign_reducers),
+    'Customers with Reduced Local Exposure (>10%)': len(local_reducers),
+    'Customers with Increased Trading Volume (>50%)': len(volume_increasers),
+    'Average Foreign Stock Change': f"{exposure_df['Foreign_Exposure_Change'].mean():.1f}%",
+    'Average Local Stock Change': f"{exposure_df['Local_Exposure_Change'].mean():.1f}%",
+    'Average Volume Change': f"{exposure_df['Volume_Change_%'].median():.1f}% (median)",
+    'Statistical Significance (Distribution)': 'Yes' if stat_results['Security_Distribution']['p_value'] < 0.05 else 'No'
 }
 
 print("\n" + "=" * 60)
