@@ -1,4 +1,4 @@
-# ==================== ANALYSIS FUNCTIONS ====================
+ ==================== ANALYSIS FUNCTIONS ====================
 
 def calculate_trading_metrics(data, groupby_cols=['Date']):
     """Calculate key trading metrics"""
@@ -441,39 +441,57 @@ def create_industry_heatmap(df, event_date, top_n=10):
 
 # ==================== MAIN ANALYSIS ====================
 
+# Choose which event to analyze
+ANALYZE_EVENT = 'trump'  # Change to 'april' to analyze April 2nd event
+
+if ANALYZE_EVENT == 'trump':
+    event_date = trump_date
+    event_name = "Trump Inauguration (Jan 20, 2025)"
+    pre_period_name = 'Pre-Event'
+    post_period_name = 'Post-Event'
+else:  # april
+    event_date = apr_event
+    event_name = "Liberation Day Tariff (Apr 2, 2025)"
+    pre_period_name = 'Pre-Event'
+    post_period_name = 'Post-Event'
+
+# Update periods for the selected event
+df['Event_Period'] = pre_period_name
+df.loc[df['Date'] >= event_date, 'Event_Period'] = post_period_name
+
 print("=" * 60)
-print("BANKING TRADE ANALYSIS - TARIFF IMPACT STUDY")
+print(f"BANKING TRADE ANALYSIS - {event_name}")
 print("=" * 60)
 
 # 1. Event Study Analysis
 print("\n1. EVENT STUDY ANALYSIS")
 print("-" * 40)
 
-# Trump inauguration event study
-trump_event = perform_event_study(df, trump_date, window_pre=30, window_post=40)
-trump_fig = create_event_study_plot(trump_event, "Trump Inauguration (Jan 20, 2025)")
-plt.savefig('trump_event_study.png', dpi=300, bbox_inches='tight')
+# Event study for selected event
+event_study_result = perform_event_study(df, event_date, window_pre=30, window_post=40)
+event_fig = create_event_study_plot(event_study_result, event_name)
+plt.savefig(f'{ANALYZE_EVENT}_event_study.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-print(f"Trump Event - Trading volume change: {trump_event['Abnormal_Amount'].sum()/1e6:.2f}M")
-print(f"Maximum daily impact: {trump_event['Abnormal_Amount'].max()/1e6:.2f}M")
+print(f"{event_name} - Trading volume change: {event_study_result['Abnormal_Amount'].sum()/1e6:.2f}M")
+print(f"Maximum daily impact: {event_study_result['Abnormal_Amount'].max()/1e6:.2f}M")
 
 # 2. Portfolio Shift Analysis
 print("\n2. PORTFOLIO COMPOSITION SHIFT")
 print("-" * 40)
 
-portfolio_shift = portfolio_shift_analysis(df, trump_date)
+portfolio_shift = portfolio_shift_analysis(df, event_date)
 print("\nSecurity Type Distribution Changes:")
 print(portfolio_shift)
 
 shift_fig = create_portfolio_shift_visualization(portfolio_shift)
-shift_fig.write_html('portfolio_shift.html')
+shift_fig.write_html(f'{ANALYZE_EVENT}_portfolio_shift.html')
 
 # 3. Statistical Significance Tests
 print("\n3. STATISTICAL SIGNIFICANCE TESTS")
 print("-" * 40)
 
-stat_results = statistical_significance_tests(df, trump_date)
+stat_results = statistical_significance_tests(df, event_date)
 
 print("\nVolume Change Test:")
 print(f"  Pre-period mean: ${stat_results['Volume_Change']['pre_mean']/1e6:.2f}M")
@@ -502,7 +520,7 @@ if 'Customer_Behavior' in stat_results:
 print("\n4. CUSTOMER SEGMENTATION ANALYSIS")
 print("-" * 40)
 
-customer_clusters = customer_behavior_clustering(df, trump_date)
+customer_clusters = customer_behavior_clustering(df, event_date)
 cluster_summary = customer_clusters.groupby('Cluster_Name').agg({
     'Foreign_Change_%': 'mean',
     'Volume_Change_%': 'mean',
@@ -513,25 +531,32 @@ print("\nCustomer Segment Characteristics:")
 print(cluster_summary)
 
 cluster_fig = create_customer_clustering_plot(customer_clusters)
-plt.savefig('customer_clusters.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'{ANALYZE_EVENT}_customer_clusters.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-# 5. Industry Impact Analysis
+# 5. Industry Impact Analysis - Fixed for flexible periods
 print("\n5. INDUSTRY IMPACT ANALYSIS")
 print("-" * 40)
 
-industry_fig = create_industry_heatmap(df, trump_date)
-plt.savefig('industry_heatmap.png', dpi=300, bbox_inches='tight')
+industry_fig = create_industry_heatmap(df, event_date)
+plt.savefig(f'{ANALYZE_EVENT}_industry_heatmap.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-# Industry ranking by impact with customer count filter
+# Industry ranking by impact with customer count filter - Fixed
 industry_customers = df.groupby('Customer_Industry')['Customer_Name'].nunique()
-industry_impact = df.groupby(['Customer_Industry', 'Period'])['Amount'].sum().unstack()
+industry_impact = df[df['Event_Period'].isin([pre_period_name, post_period_name])].groupby(['Customer_Industry', 'Event_Period'])['Amount'].sum().unstack(fill_value=0)
 
 # Add customer count
 industry_impact['Customer_Count'] = industry_customers
-industry_impact['Change_%'] = ((industry_impact['Post-Trump'] - industry_impact['Pre-Trump']) / 
-                               industry_impact['Pre-Trump'] * 100).round(2)
+industry_impact['Change_%'] = 0  # Initialize
+
+# Calculate change only if both periods exist
+if pre_period_name in industry_impact.columns and post_period_name in industry_impact.columns:
+    mask = industry_impact[pre_period_name] > 0
+    industry_impact.loc[mask, 'Change_%'] = (
+        (industry_impact.loc[mask, post_period_name] - industry_impact.loc[mask, pre_period_name]) / 
+        industry_impact.loc[mask, pre_period_name] * 100
+    ).round(2)
 
 # Filter industries with at least 10 customers
 significant_industries = industry_impact[industry_impact['Customer_Count'] >= 10]
@@ -603,7 +628,7 @@ plt.close()
 n_outliers = len(daily_metrics[(daily_metrics['Amount'] < lower_bound) | (daily_metrics['Amount'] > upper_bound)])
 print(f"\nOutliers detected and capped: {n_outliers} days out of {len(daily_metrics)}")
 
-# 7. Recommendation Matrix - Fixed version
+# 7. Recommendation Matrix - Fixed version with event date flexibility
 print("\n7. ACTIONABLE INSIGHTS FOR RMs")
 print("-" * 40)
 
@@ -611,8 +636,8 @@ print("-" * 40)
 customer_exposure = []
 for customer in df['Customer_Name'].unique():
     cust_data = df[df['Customer_Name'] == customer]
-    pre_data = cust_data[cust_data['Date'] < trump_date]
-    post_data = cust_data[cust_data['Date'] >= trump_date]
+    pre_data = cust_data[cust_data['Date'] < event_date]
+    post_data = cust_data[cust_data['Date'] >= event_date]
     
     if len(pre_data) > 0 and len(post_data) > 0:
         # Foreign exposure
@@ -675,10 +700,10 @@ for key, value in summary_stats.items():
     print(f"{key}: {value}")
 
 print("\n" + "=" * 60)
-print("Analysis complete. Generated files:")
-print("- trump_event_study.png")
-print("- portfolio_shift.html")
-print("- customer_clusters.png")
-print("- industry_heatmap.png")
+print(f"Analysis complete for {event_name}. Generated files:")
+print(f"- {ANALYZE_EVENT}_event_study.png")
+print(f"- {ANALYZE_EVENT}_portfolio_shift.html")
+print(f"- {ANALYZE_EVENT}_customer_clusters.png")
+print(f"- {ANALYZE_EVENT}_industry_heatmap.png")
 print("- time_series_analysis.png")
 print("=" * 60)
