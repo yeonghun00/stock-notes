@@ -16,39 +16,80 @@ warnings.filterwarnings('ignore')
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
-# ==================== DATA LOADING ====================
-# Load your actual data here
-# df = pd.read_csv('your_data.csv')
-# df['Date'] = pd.to_datetime(df['Date'])
+# ==================== DATA GENERATION ====================
+# Simulating realistic banking trade data
+np.random.seed(42)
 
-# For now, using the structure you described
-# Columns: Date, Customer_Name, Customer_Industry, Investment, Amount, Security_Type
-# WHERE Amount is ALREADY NET (positive for buy, negative for sell)
+# Generate date range
+start_date = '2023-01-01'
+end_date = '2025-05-29'
+dates = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days only
 
-# Key event - ONLY April 2nd
+# Key event - focusing only on April 2nd
 apr_event = pd.Timestamp('2025-04-02')
 
-# ==================== DATA PREPROCESSING ====================
+# Customer and security setup
+n_customers = 500
+customers = [f'Customer_{i:03d}' for i in range(n_customers)]
+industries = ['Technology', 'Manufacturing', 'Finance', 'Retail', 'Healthcare', 
+              'Energy', 'Real Estate', 'Consumer Goods']
+security_types = ['Foreign Stocks', 'Local Stocks', 'Bonds', 'Certificate of Deposit', 
+                  'Unit Trusts', 'ETFs']
 
-# Add derived features
-df['Year'] = df['Date'].dt.year
-df['Month'] = df['Date'].dt.month
-df['Week'] = df['Date'].dt.isocalendar().week
-df['DayOfWeek'] = df['Date'].dt.dayofweek
+# Generate trades
+trades = []
+for date in dates:
+    # Adjust trading patterns based on April 2nd event
+    if date >= apr_event:
+        foreign_bias = 0.25  # Reduced foreign investment after event
+        volume_multiplier = 1.3  # Increased trading volume
+    else:
+        foreign_bias = 0.45
+        volume_multiplier = 1.0
+    
+    # Daily trades (varying by day)
+    n_trades = np.random.poisson(200 * volume_multiplier)
+    
+    for _ in range(n_trades):
+        customer = np.random.choice(customers)
+        industry = np.random.choice(industries)
+        
+        # Bias security selection based on period
+        if date >= apr_event:
+            security_probs = [foreign_bias, 1-foreign_bias+0.15, 0.12, 0.08, 0.05, 0.05]
+        else:
+            security_probs = [0.45, 0.35, 0.10, 0.05, 0.03, 0.02]
+        
+        security_probs = np.array(security_probs) / sum(security_probs)
+        security_type = np.random.choice(security_types, p=security_probs)
+        
+        # Generate trade details - all amounts are already NET (positive = net buy, negative = net sell)
+        net_amount = np.random.normal(0, 1000000)  # Can be positive or negative
+        
+        trades.append({
+            'Date': date,
+            'Customer_Name': customer,
+            'Customer_Industry': industry,
+            'Net_Amount': net_amount,  # This is the only amount field we need
+            'Security_Type': security_type
+        })
 
-# Define periods for April event only
-df['Period'] = 'Pre-April'
-df.loc[df['Date'] >= apr_event, 'Period'] = 'Post-April'
-
-# Create absolute amount for volume calculations
-df['Abs_Amount'] = df['Amount'].abs()
+# Create DataFrame
+df = pd.DataFrame(trades)
+print(f"Generated {len(df)} trades from {df['Date'].min()} to {df['Date'].max()}")
 
 # ==================== ANALYSIS FUNCTIONS ====================
 
-def remove_outliers(data, column, percentile=99):
-    """Remove outliers beyond 99th percentile"""
-    threshold = np.percentile(data[column].abs(), percentile)
-    return data[data[column].abs() <= threshold]
+def calculate_trading_metrics(data, groupby_cols=['Date']):
+    """Calculate key trading metrics"""
+    metrics = data.groupby(groupby_cols).agg({
+        'Net_Amount': ['sum', 'mean', 'count', 'std']
+    }).reset_index()
+    
+    metrics.columns = ['_'.join(col).strip() for col in metrics.columns.values]
+    metrics.columns = [col.replace('_', '') if col.endswith('_') else col for col in metrics.columns]
+    
+    return metrics
 
 def perform_event_study(df, event_date, window_pre=30, window_post=30):
     """Perform event study analysis"""
@@ -62,26 +103,23 @@ def perform_event_study(df, event_date, window_pre=30, window_post=30):
     event_data = df[(df['Date'] >= pre_start) & (df['Date'] <= post_end)].copy()
     event_data['Days_from_event'] = (event_data['Date'] - event_date).dt.days
     
-    # Calculate daily metrics using NET amounts
+    # Calculate daily metrics
     daily_metrics = event_data.groupby('Days_from_event').agg({
-        'Amount': 'sum',  # Net position (already net)
-        'Abs_Amount': 'sum',  # Total volume
-        'Customer_Name': 'count'  # Number of trades
+        'Net_Amount': ['sum', 'count', 'mean']
     }).reset_index()
     
-    daily_metrics.columns = ['Days_from_event', 'Net_Position', 'Total_Volume', 'Trade_Count']
+    daily_metrics.columns = ['Days_from_event', 'Total_Net_Amount', 'Trade_Count', 'Avg_Net_Amount']
     
     # Calculate abnormal trading (using pre-event average as baseline)
     pre_event = daily_metrics[daily_metrics['Days_from_event'] < 0]
-    baseline_volume = pre_event['Total_Volume'].mean()
-    baseline_net = pre_event['Net_Position'].mean()
+    baseline_amount = pre_event['Total_Net_Amount'].mean()
+    baseline_count = pre_event['Trade_Count'].mean()
     
-    daily_metrics['Abnormal_Volume'] = daily_metrics['Total_Volume'] - baseline_volume
-    daily_metrics['Abnormal_Net'] = daily_metrics['Net_Position'] - baseline_net
+    daily_metrics['Abnormal_Amount'] = daily_metrics['Total_Net_Amount'] - baseline_amount
+    daily_metrics['Abnormal_Count'] = daily_metrics['Trade_Count'] - baseline_count
     
     # Cumulative abnormal
-    daily_metrics['CAV'] = daily_metrics['Abnormal_Volume'].cumsum()
-    daily_metrics['CAN'] = daily_metrics['Abnormal_Net'].cumsum()
+    daily_metrics['CAR'] = daily_metrics['Abnormal_Amount'].cumsum()
     
     return daily_metrics
 
@@ -90,9 +128,9 @@ def portfolio_shift_analysis(df, date_cutoff):
     pre_data = df[df['Date'] < date_cutoff]
     post_data = df[df['Date'] >= date_cutoff]
     
-    # Calculate security type distribution using absolute amounts
-    pre_dist = pre_data.groupby('Security_Type')['Abs_Amount'].sum()
-    post_dist = post_data.groupby('Security_Type')['Abs_Amount'].sum()
+    # Calculate security type distribution by absolute value (since we're dealing with net amounts)
+    pre_dist = pre_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
+    post_dist = post_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
     
     pre_pct = (pre_dist / pre_dist.sum() * 100).round(2)
     post_pct = (post_dist / post_dist.sum() * 100).round(2)
@@ -119,41 +157,95 @@ def customer_behavior_clustering(df, event_date):
         post_data = cust_data[cust_data['Date'] >= event_date]
         
         if len(pre_data) > 0 and len(post_data) > 0:
-            # Calculate metrics using absolute amounts for volumes
-            pre_volume = pre_data['Abs_Amount'].sum()
-            post_volume = post_data['Abs_Amount'].sum()
+            # Calculate metrics using absolute values for volume, but keep sign for foreign exposure
+            pre_foreign = pre_data[pre_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].sum()
+            post_foreign = post_data[post_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].sum()
             
-            # Net positions
-            pre_net = pre_data['Amount'].sum()
-            post_net = post_data['Amount'].sum()
+            pre_total_abs = pre_data['Net_Amount'].abs().sum()
+            post_total_abs = post_data['Net_Amount'].abs().sum()
+            
+            pre_foreign_pct = (abs(pre_foreign) / pre_total_abs * 100) if pre_total_abs > 0 else 0
+            post_foreign_pct = (abs(post_foreign) / post_total_abs * 100) if post_total_abs > 0 else 0
+            
+            # Calculate absolute changes for better clustering
+            foreign_abs_change = abs(post_foreign_pct - pre_foreign_pct)
+            volume_abs_change = abs((post_total_abs - pre_total_abs) / pre_total_abs * 100) if pre_total_abs > 0 else 0
             
             customer_metrics.append({
                 'Customer': customer,
-                'Volume_Change_%': ((post_volume - pre_volume) / pre_volume * 100) if pre_volume > 0 else 0,
-                'Net_Position_Change': post_net - pre_net,
+                'Pre_Foreign_%': pre_foreign_pct,
+                'Post_Foreign_%': post_foreign_pct,
+                'Foreign_Change_%': post_foreign_pct - pre_foreign_pct,
+                'Volume_Change_%': ((post_total_abs - pre_total_abs) / pre_total_abs * 100) if pre_total_abs > 0 else 0,
+                'Foreign_Abs_Change_%': foreign_abs_change,
+                'Volume_Abs_Change_%': volume_abs_change,
                 'Pre_Trade_Count': len(pre_data),
                 'Post_Trade_Count': len(post_data),
-                'Total_Volume': pre_volume + post_volume
+                'Total_Volume': pre_total_abs + post_total_abs
             })
     
     customer_df = pd.DataFrame(customer_metrics)
     
-    # Remove outliers at 99th percentile
-    customer_df = remove_outliers(customer_df, 'Volume_Change_%', 99)
-    customer_df = remove_outliers(customer_df, 'Net_Position_Change', 99)
+    # Filter out customers with minimal changes
+    significant_customers = customer_df[
+        (customer_df['Foreign_Abs_Change_%'] > 5) | 
+        (customer_df['Volume_Abs_Change_%'] > 10)
+    ].copy()
     
-    # Clustering
-    features = ['Volume_Change_%', 'Net_Position_Change']
-    X = customer_df[features].fillna(0)
+    if len(significant_customers) < 50:
+        print(f"Warning: Only {len(significant_customers)} customers show significant changes")
+        significant_customers = customer_df.copy()
+    
+    # Perform clustering
+    features = ['Foreign_Change_%', 'Volume_Change_%']
+    X = significant_customers[features].fillna(0)
     
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    # Determine optimal number of clusters
-    n_clusters = min(4, max(2, len(customer_df) // 50))
+    n_clusters = min(4, max(2, len(significant_customers) // 50))
     
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    customer_df['Cluster'] = kmeans.fit_predict(X_scaled)
+    significant_customers['Cluster'] = kmeans.fit_predict(X_scaled)
+    
+    # Name clusters based on behavior patterns
+    cluster_centers = pd.DataFrame(
+        scaler.inverse_transform(kmeans.cluster_centers_), 
+        columns=features
+    )
+    
+    cluster_names = {}
+    for i in range(n_clusters):
+        foreign_change = cluster_centers.iloc[i]['Foreign_Change_%']
+        volume_change = cluster_centers.iloc[i]['Volume_Change_%']
+        
+        if abs(foreign_change) < 5 and abs(volume_change) < 10:
+            cluster_names[i] = 'Stable Investors'
+        elif foreign_change < -10:
+            cluster_names[i] = 'Foreign Reducers'
+        elif foreign_change > 10:
+            cluster_names[i] = 'Foreign Increasers'
+        elif volume_change > 20:
+            cluster_names[i] = 'Volume Increasers'
+        elif volume_change < -20:
+            cluster_names[i] = 'Volume Reducers'
+        else:
+            cluster_names[i] = 'Moderate Adjusters'
+    
+    significant_customers['Cluster_Name'] = significant_customers['Cluster'].map(cluster_names)
+    
+    # Add back stable customers if filtered out
+    if len(significant_customers) < len(customer_df):
+        stable_customers = customer_df[
+            (customer_df['Foreign_Abs_Change_%'] <= 5) & 
+            (customer_df['Volume_Abs_Change_%'] <= 10)
+        ].copy()
+        stable_customers['Cluster'] = -1
+        stable_customers['Cluster_Name'] = 'Stable Investors'
+        
+        customer_df = pd.concat([significant_customers, stable_customers], ignore_index=True)
+    else:
+        customer_df = significant_customers
     
     return customer_df
 
@@ -172,9 +264,9 @@ def statistical_significance_tests(df, event_date, window=30):
     
     results = {}
     
-    # 1. T-test for average daily trading volume
-    pre_daily = pre_data.groupby('Date')['Abs_Amount'].sum()
-    post_daily = post_data.groupby('Date')['Abs_Amount'].sum()
+    # 1. T-test for average daily trading volume (using absolute values)
+    pre_daily = pre_data.groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
+    post_daily = post_data.groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
     
     t_stat, p_value = stats.ttest_ind(pre_daily, post_daily)
     results['Volume_Change'] = {
@@ -185,126 +277,498 @@ def statistical_significance_tests(df, event_date, window=30):
         'percent_change': ((post_daily.mean() - pre_daily.mean()) / pre_daily.mean() * 100)
     }
     
-    # 2. Chi-square test for security type distribution
+    # 2. T-test for net position changes
+    pre_net = pre_data.groupby('Date')['Net_Amount'].sum()
+    post_net = post_data.groupby('Date')['Net_Amount'].sum()
+    
+    t_stat_net, p_value_net = stats.ttest_ind(pre_net, post_net)
+    results['Net_Position_Change'] = {
+        't_statistic': t_stat_net,
+        'p_value': p_value_net,
+        'pre_mean': pre_net.mean(),
+        'post_mean': post_net.mean()
+    }
+    
+    # 3. Chi-square test for security type distribution
     pre_security = pre_data['Security_Type'].value_counts()
     post_security = post_data['Security_Type'].value_counts()
     
-    # Align indices
     all_securities = list(set(pre_security.index) | set(post_security.index))
     pre_counts = [pre_security.get(s, 0) for s in all_securities]
     post_counts = [post_security.get(s, 0) for s in all_securities]
     
-    # Scale expected frequencies
-    post_total = sum(post_counts)
-    pre_total = sum(pre_counts)
-    expected_counts = [count * post_total / pre_total for count in pre_counts]
+    contingency_table = pd.DataFrame({
+        'Pre': pre_counts,
+        'Post': post_counts
+    }, index=all_securities)
     
-    chi2, p_chi = stats.chisquare(post_counts, expected_counts)
+    chi2, p_chi, dof, expected = stats.chi2_contingency(contingency_table.T)
     results['Security_Distribution'] = {
         'chi2_statistic': chi2,
-        'p_value': p_chi
+        'p_value': p_chi,
+        'degrees_of_freedom': dof
     }
-    
-    # 3. Wilcoxon signed-rank test for paired customer data
-    customer_changes = []
-    for customer in df['Customer_Name'].unique():
-        pre_cust = pre_data[pre_data['Customer_Name'] == customer]['Abs_Amount'].sum()
-        post_cust = post_data[post_data['Customer_Name'] == customer]['Abs_Amount'].sum()
-        if pre_cust > 0 and post_cust > 0:
-            customer_changes.append(post_cust - pre_cust)
-    
-    if len(customer_changes) > 20:
-        wilcoxon_stat, wilcoxon_p = stats.wilcoxon(customer_changes)
-        results['Customer_Behavior'] = {
-            'wilcoxon_statistic': wilcoxon_stat,
-            'p_value': wilcoxon_p,
-            'n_customers': len(customer_changes)
-        }
     
     return results
 
-# ==================== MAIN ANALYSIS FOR APRIL 2 ONLY ====================
+# ==================== VISUALIZATION FUNCTIONS ====================
 
+def create_event_study_plot(event_metrics, event_name):
+    """Create event study visualization"""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(f'Event Study: {event_name}', fontsize=16)
+    
+    # Plot 1: Daily Net Trading Amount
+    ax1 = axes[0, 0]
+    ax1.plot(event_metrics['Days_from_event'], event_metrics['Total_Net_Amount']/1e6, 
+             marker='o', markersize=4)
+    ax1.axvline(x=0, color='red', linestyle='--', label='Event Date')
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax1.set_xlabel('Days from Event')
+    ax1.set_ylabel('Net Trading Amount (Million $)')
+    ax1.set_title('Daily Net Trading Amount')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+# Trade count
+ax2.plot(daily_metrics['Date'], daily_metrics['Trade_Count'], alpha=0.7, linewidth=1, color='blue')
+ax2.axvline(x=apr_event, color='red', linestyle='--', linewidth=2)
+ax2.set_xlabel('Date')
+ax2.set_ylabel('Number of Trades')
+ax2.set_title('Daily Trade Count')
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('april_time_series_analysis.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# Report outliers found
+n_outliers = len(daily_metrics[(daily_metrics['Total_Net_Amount'] < lower_bound) | 
+                              (daily_metrics['Total_Net_Amount'] > upper_bound)])
+print(f"\nOutliers detected and capped: {n_outliers} days out of {len(daily_metrics)}")
+
+# 7. Seasonality Check - Compare with 2024
+print("\n7. SEASONALITY ANALYSIS - 2024 vs 2025 Comparison")
+print("-" * 40)
+
+# Define comparison periods
+event_2025 = pd.Timestamp('2025-04-02')
+event_2024 = pd.Timestamp('2024-04-02')
+window_days = 30
+
+def get_period_metrics(df, center_date, window):
+    start_date = center_date - timedelta(days=window)
+    end_date = center_date + timedelta(days=window)
+    
+    pre_data = df[(df['Date'] >= start_date) & (df['Date'] < center_date)]
+    post_data = df[(df['Date'] >= center_date) & (df['Date'] <= end_date)]
+    
+    # Calculate metrics using absolute values for volume
+    pre_volume = pre_data['Net_Amount'].abs().sum()
+    post_volume = post_data['Net_Amount'].abs().sum()
+    volume_change = ((post_volume - pre_volume) / pre_volume * 100) if pre_volume > 0 else 0
+    
+    # Net position
+    pre_net = pre_data['Net_Amount'].sum()
+    post_net = post_data['Net_Amount'].sum()
+    
+    # Security type distribution
+    pre_dist = pre_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
+    post_dist = post_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
+    
+    return {
+        'pre_volume': pre_volume,
+        'post_volume': post_volume,
+        'volume_change_%': volume_change,
+        'pre_net': pre_net,
+        'post_net': post_net,
+        'pre_distribution': pre_dist,
+        'post_distribution': post_dist
+    }
+
+# Get metrics for both years
+metrics_2024 = get_period_metrics(df, event_2024, window_days)
+metrics_2025 = get_period_metrics(df, event_2025, window_days)
+
+print(f"\nApril 2nd Period Comparison:")
+print(f"\n2024 (Same period):")
+print(f"  Pre-period volume: ${metrics_2024['pre_volume']/1e6:.2f}M")
+print(f"  Post-period volume: ${metrics_2024['post_volume']/1e6:.2f}M")
+print(f"  Volume change: {metrics_2024['volume_change_%']:.1f}%")
+print(f"  Net position change: ${(metrics_2024['post_net'] - metrics_2024['pre_net'])/1e6:.2f}M")
+
+print(f"\n2025 (Event year):")
+print(f"  Pre-period volume: ${metrics_2025['pre_volume']/1e6:.2f}M")
+print(f"  Post-period volume: ${metrics_2025['post_volume']/1e6:.2f}M")
+print(f"  Volume change: {metrics_2025['volume_change_%']:.1f}%")
+print(f"  Net position change: ${(metrics_2025['post_net'] - metrics_2025['pre_net'])/1e6:.2f}M")
+
+print(f"\nDifference-in-Differences:")
+print(f"  Volume: {metrics_2025['volume_change_%'] - metrics_2024['volume_change_%']:.1f}%")
+print(f"  This is the TRUE event impact after controlling for seasonality")
+
+# Security type changes comparison
+print(f"\nSecurity Type Distribution Changes:")
+
+# Calculate distribution changes for both years
+security_types = set(list(metrics_2024['pre_distribution'].index) + 
+                    list(metrics_2024['post_distribution'].index) +
+                    list(metrics_2025['pre_distribution'].index) + 
+                    list(metrics_2025['post_distribution'].index))
+
+comparison_table = []
+for sec_type in security_types:
+    pre_2024 = metrics_2024['pre_distribution'].get(sec_type, 0)
+    post_2024 = metrics_2024['post_distribution'].get(sec_type, 0)
+    pre_2025 = metrics_2025['pre_distribution'].get(sec_type, 0)
+    post_2025 = metrics_2025['post_distribution'].get(sec_type, 0)
+    
+    # Calculate percentage of total
+    if metrics_2024['pre_volume'] > 0 and metrics_2024['post_volume'] > 0:
+        change_2024 = (post_2024/metrics_2024['post_volume'] - pre_2024/metrics_2024['pre_volume']) * 100
+    else:
+        change_2024 = 0
+        
+    if metrics_2025['pre_volume'] > 0 and metrics_2025['post_volume'] > 0:
+        change_2025 = (post_2025/metrics_2025['post_volume'] - pre_2025/metrics_2025['pre_volume']) * 100
+    else:
+        change_2025 = 0
+    
+    diff_in_diff = change_2025 - change_2024
+    
+    comparison_table.append({
+        'Security_Type': sec_type,
+        '2024_Change_%': round(change_2024, 2),
+        '2025_Change_%': round(change_2025, 2),
+        'Diff_in_Diff': round(diff_in_diff, 2),
+        'True_Impact': 'Yes' if abs(diff_in_diff) > 5 else 'No'
+    })
+
+comparison_df = pd.DataFrame(comparison_table).sort_values('Diff_in_Diff', ascending=False)
+print("\n", comparison_df.to_string(index=False))
+
+# Visualization of seasonality
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+fig.suptitle(f'Seasonality Check: 2024 vs 2025 (April 2nd Period)', fontsize=16)
+
+# Plot 1: Daily volumes comparison
+ax1 = axes[0, 0]
+dates_2024 = pd.date_range(start=event_2024-timedelta(days=window_days), 
+                          end=event_2024+timedelta(days=window_days), freq='B')
+dates_2025 = pd.date_range(start=event_2025-timedelta(days=window_days), 
+                          end=event_2025+timedelta(days=window_days), freq='B')
+
+data_2024 = df[df['Date'].isin(dates_2024)].groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
+data_2025 = df[df['Date'].isin(dates_2025)].groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
+
+# Align to same day numbers
+days_from_event = range(-window_days, window_days+1)
+ax1.plot(days_from_event[:len(data_2024)], data_2024.values/1e6, label='2024', alpha=0.7, linewidth=2)
+ax1.plot(days_from_event[:len(data_2025)], data_2025.values/1e6, label='2025', alpha=0.7, linewidth=2)
+ax1.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+ax1.set_xlabel('Days from Event Date')
+ax1.set_ylabel('Trading Volume (Million $)')
+ax1.set_title('Daily Trading Volume Comparison')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+# Plot 2: Cumulative volume change
+ax2 = axes[0, 1]
+cumsum_2024 = (data_2024.values - data_2024.values[0]).cumsum()
+cumsum_2025 = (data_2025.values - data_2025.values[0]).cumsum()
+ax2.plot(days_from_event[:len(cumsum_2024)], cumsum_2024/1e6, label='2024', linewidth=2)
+ax2.plot(days_from_event[:len(cumsum_2025)], cumsum_2025/1e6, label='2025', linewidth=2)
+ax2.axvline(x=0, color='red', linestyle='--', alpha=0.5)
+ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+ax2.set_xlabel('Days from Event Date')
+ax2.set_ylabel('Cumulative Change (Million $)')
+ax2.set_title('Cumulative Volume Change from Start')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
+
+# Plot 3: Security type changes
+ax3 = axes[1, 0]
+top_securities = comparison_df.nlargest(5, 'Diff_in_Diff')['Security_Type']
+x = np.arange(len(top_securities))
+width = 0.35
+
+changes_2024 = [comparison_df[comparison_df['Security_Type']==s]['2024_Change_%'].values[0] for s in top_securities]
+changes_2025 = [comparison_df[comparison_df['Security_Type']==s]['2025_Change_%'].values[0] for s in top_securities]
+
+ax3.bar(x - width/2, changes_2024, width, label='2024', alpha=0.8)
+ax3.bar(x + width/2, changes_2025, width, label='2025', alpha=0.8)
+ax3.set_xlabel('Security Type')
+ax3.set_ylabel('Distribution Change (%)')
+ax3.set_title('Top 5 Security Type Changes')
+ax3.set_xticks(x)
+ax3.set_xticklabels(top_securities, rotation=45, ha='right')
+ax3.legend()
+ax3.grid(True, alpha=0.3)
+
+# Plot 4: Difference-in-Differences
+ax4 = axes[1, 1]
+diff_in_diff_values = comparison_df.sort_values('Diff_in_Diff', ascending=True)
+colors = ['red' if x < 0 else 'green' for x in diff_in_diff_values['Diff_in_Diff']]
+ax4.barh(range(len(diff_in_diff_values)), diff_in_diff_values['Diff_in_Diff'], color=colors, alpha=0.7)
+ax4.set_yticks(range(len(diff_in_diff_values)))
+ax4.set_yticklabels(diff_in_diff_values['Security_Type'])
+ax4.set_xlabel('Difference-in-Differences (%)')
+ax4.set_title('True Event Impact (2025 change - 2024 change)')
+ax4.axvline(x=0, color='black', linestyle='-', alpha=0.3)
+ax4.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('april_seasonality_check.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# Statistical test for seasonality
+daily_changes_2024 = data_2024.pct_change().dropna()
+daily_changes_2025 = data_2025.pct_change().dropna()
+
+# Mann-Whitney U test
+u_stat, p_value = stats.mannwhitneyu(daily_changes_2024, daily_changes_2025, alternative='two-sided')
+
+print(f"\n" + "="*60)
+print("SEASONALITY TEST RESULTS")
+print("="*60)
+print(f"Mann-Whitney U test comparing 2024 vs 2025 patterns:")
+print(f"  U-statistic: {u_stat:.3f}")
+print(f"  P-value: {p_value:.4f}")
+print(f"  Interpretation: {'Patterns are DIFFERENT (Event impact confirmed)' if p_value < 0.05 else 'Patterns are SIMILAR (Might be seasonal)'}")
+
+# Summary
+true_impacts = comparison_df[comparison_df['True_Impact'] == 'Yes'].sort_values('Diff_in_Diff', ascending=False)
+print(f"\nSecurity types with TRUE event impact (after controlling for seasonality):")
+for _, row in true_impacts.iterrows():
+    print(f"  {row['Security_Type']}: {row['Diff_in_Diff']:.1f}% change beyond seasonal pattern")
+
+# 8. Executive Summary
+print("\n" + "=" * 60)
+print("EXECUTIVE SUMMARY")
+print("=" * 60)
+
+# Calculate key metrics
+total_customers = df['Customer_Name'].nunique()
+pre_data = df[df['Date'] < event_date]
+post_data = df[df['Date'] >= event_date]
+
+pre_volume = pre_data['Net_Amount'].abs().sum()
+post_volume = post_data['Net_Amount'].abs().sum()
+volume_change = ((post_volume - pre_volume) / pre_volume * 100)
+
+pre_net = pre_data['Net_Amount'].sum()
+post_net = post_data['Net_Amount'].sum()
+net_change = post_net - pre_net
+
+foreign_pre = pre_data[pre_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].abs().sum()
+foreign_post = post_data[post_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].abs().sum()
+foreign_change = ((foreign_post - foreign_pre) / foreign_pre * 100) if foreign_pre > 0 else 0
+
+summary_stats = {
+    'Total Customers Analyzed': total_customers,
+    'Pre-Event Trading Volume': f"${pre_volume/1e6:.1f}M",
+    'Post-Event Trading Volume': f"${post_volume/1e6:.1f}M",
+    'Volume Change': f"{volume_change:.1f}%",
+    'Net Position Change': f"${net_change/1e6:.1f}M",
+    'Foreign Stocks Volume Change': f"{foreign_change:.1f}%",
+    'Statistical Significance (Volume)': 'Yes' if stat_results['Volume_Change']['p_value'] < 0.05 else 'No',
+    'Statistical Significance (Distribution)': 'Yes' if stat_results['Security_Distribution']['p_value'] < 0.05 else 'No',
+    'Seasonality Controlled': 'Yes' if p_value < 0.05 else 'No'
+}
+
+for key, value in summary_stats.items():
+    print(f"{key}: {value}")
+
+print("\n" + "=" * 60)
+print("FILES GENERATED:")
+print("- april_event_study.png")
+print("- april_portfolio_shift.html") 
+print("- april_customer_clusters.png")
+print("- april_industry_heatmap.png")
+print("- april_time_series_analysis.png")
+print("- april_seasonality_check.png")
+print("=" * 60))
+    
+    # Plot 2: Cumulative Abnormal Trading
+    ax2 = axes[0, 1]
+    ax2.plot(event_metrics['Days_from_event'], event_metrics['CAR']/1e6, 
+             marker='o', markersize=4, color='green')
+    ax2.axvline(x=0, color='red', linestyle='--', label='Event Date')
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax2.set_xlabel('Days from Event')
+    ax2.set_ylabel('Cumulative Abnormal Trading (Million $)')
+    ax2.set_title('Cumulative Abnormal Trading')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Trade Count
+    ax3 = axes[1, 0]
+    ax3.bar(event_metrics['Days_from_event'], event_metrics['Trade_Count'], 
+            color='skyblue', alpha=0.7)
+    ax3.axvline(x=0, color='red', linestyle='--', label='Event Date')
+    ax3.set_xlabel('Days from Event')
+    ax3.set_ylabel('Number of Trades')
+    ax3.set_title('Daily Trade Count')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Average Net Amount per Trade
+    ax4 = axes[1, 1]
+    colors = ['green' if x > 0 else 'red' for x in event_metrics['Avg_Net_Amount']]
+    ax4.bar(event_metrics['Days_from_event'], event_metrics['Avg_Net_Amount']/1000, 
+            color=colors, alpha=0.7)
+    ax4.axvline(x=0, color='red', linestyle='--', label='Event Date')
+    ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax4.set_xlabel('Days from Event')
+    ax4.set_ylabel('Avg Net Amount per Trade (Thousand $)')
+    ax4.set_title('Average Net Amount per Trade')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+def create_portfolio_shift_visualization(shift_df):
+    """Create portfolio composition shift visualization"""
+    fig = make_subplots(rows=1, cols=2, 
+                        subplot_titles=('Portfolio Composition Change', 'Absolute % Change'),
+                        specs=[[{'type': 'bar'}, {'type': 'bar'}]])
+    
+    # Grouped bar chart
+    fig.add_trace(
+        go.Bar(name='Pre-Period', 
+               x=shift_df.index, 
+               y=shift_df['Pre_Period_%'],
+               marker_color='lightblue'),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Bar(name='Post-Period', 
+               x=shift_df.index, 
+               y=shift_df['Post_Period_%'],
+               marker_color='darkblue'),
+        row=1, col=1
+    )
+    
+    # Change bar chart
+    colors = ['red' if x < 0 else 'green' for x in shift_df['Change_%']]
+    fig.add_trace(
+        go.Bar(x=shift_df.index, 
+               y=shift_df['Change_%'],
+               marker_color=colors,
+               showlegend=False),
+        row=1, col=2
+    )
+    
+    fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
+    fig.update_yaxes(title_text="Change (% points)", row=1, col=2)
+    fig.update_xaxes(title_text="Security Type", row=1, col=1)
+    fig.update_xaxes(title_text="Security Type", row=1, col=2)
+    
+    fig.update_layout(height=500, title_text="Portfolio Composition Shift Analysis")
+    return fig
+
+def create_customer_clustering_plot(customer_df):
+    """Create customer clustering visualization"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Scatter plot of clusters
+    colors = ['blue', 'red', 'green', 'orange']
+    for i, cluster in enumerate(customer_df['Cluster_Name'].unique()):
+        cluster_data = customer_df[customer_df['Cluster_Name'] == cluster]
+        ax1.scatter(cluster_data['Foreign_Change_%'], 
+                   cluster_data['Volume_Change_%'],
+                   label=cluster, color=colors[i % len(colors)], alpha=0.6)
+    
+    ax1.set_xlabel('Foreign Stock % Change')
+    ax1.set_ylabel('Trading Volume % Change')
+    ax1.set_title('Customer Behavioral Clusters')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    ax1.axvline(x=0, color='black', linestyle='-', alpha=0.3)
+    
+    # Cluster distribution
+    cluster_counts = customer_df['Cluster_Name'].value_counts()
+    ax2.pie(cluster_counts.values, labels=cluster_counts.index, autopct='%1.1f%%',
+            colors=colors[:len(cluster_counts)])
+    ax2.set_title('Distribution of Customer Segments')
+    
+    plt.tight_layout()
+    return fig
+
+def create_industry_heatmap(df, event_date, top_n=8):
+    """Create industry impact heatmap"""
+    event_date = pd.Timestamp(event_date)
+    
+    pre_data = df[df['Date'] < event_date]
+    post_data = df[df['Date'] >= event_date]
+    
+    # Get top industries by total trading volume (absolute)
+    industry_volume = df.groupby('Customer_Industry')['Net_Amount'].apply(lambda x: x.abs().sum()).sort_values(ascending=False)
+    top_industries = industry_volume.head(top_n).index.tolist()
+    
+    # Filter data for top industries
+    pre_filtered = pre_data[pre_data['Customer_Industry'].isin(top_industries)]
+    post_filtered = post_data[post_data['Customer_Industry'].isin(top_industries)]
+    
+    # Create pivot tables using absolute values for volume comparison
+    pre_pivot = pre_filtered.pivot_table(values='Net_Amount', 
+                                         index='Customer_Industry', 
+                                         columns='Security_Type', 
+                                         aggfunc=lambda x: x.abs().sum(), fill_value=0)
+    
+    post_pivot = post_filtered.pivot_table(values='Net_Amount', 
+                                          index='Customer_Industry', 
+                                          columns='Security_Type', 
+                                          aggfunc=lambda x: x.abs().sum(), fill_value=0)
+    
+    # Ensure same shape
+    all_industries = sorted(list(set(pre_pivot.index) | set(post_pivot.index)))
+    all_securities = sorted(list(set(pre_pivot.columns) | set(post_pivot.columns)))
+    
+    pre_pivot = pre_pivot.reindex(index=all_industries, columns=all_securities, fill_value=0)
+    post_pivot = post_pivot.reindex(index=all_industries, columns=all_securities, fill_value=0)
+    
+    # Calculate percentage change
+    change_pivot = ((post_pivot - pre_pivot) / pre_pivot * 100).replace([np.inf, -np.inf], 0).fillna(0).round(1)
+    
+    # Create heatmap
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(change_pivot, annot=True, fmt='.1f', cmap='RdYlGn', center=0,
+                cbar_kws={'label': '% Change'}, vmin=-100, vmax=100)
+    plt.title(f'Top {top_n} Industries & Security Types - Trading Volume Change (%)')
+    plt.xlabel('Security Type')
+    plt.ylabel('Industry')
+    plt.tight_layout()
+    return plt.gcf()
+
+# ==================== MAIN ANALYSIS ====================
+
+# Focus only on April 2nd event
 event_date = apr_event
-event_name = "Liberation Day Tariff (Apr 2, 2025)"
+event_name = "Liberation Day Event (Apr 2, 2025)"
+
+# Update periods
+df['Event_Period'] = 'Pre-Event'
+df.loc[df['Date'] >= event_date, 'Event_Period'] = 'Post-Event'
 
 print("=" * 60)
 print(f"BANKING TRADE ANALYSIS - {event_name}")
 print("=" * 60)
 
-# Remove outliers at 99th percentile
-print("\nRemoving outliers at 99th percentile...")
-original_count = len(df)
-df_clean = remove_outliers(df, 'Amount', 99)
-removed_count = original_count - len(df_clean)
-print(f"Removed {removed_count} outlier trades ({removed_count/original_count*100:.2f}%)")
-
-# Use cleaned data for analysis
-df = df_clean
-
 # 1. Event Study Analysis
 print("\n1. EVENT STUDY ANALYSIS")
 print("-" * 40)
 
-event_study_result = perform_event_study(df, event_date, window_pre=30, window_post=30)
-
-# Create event study visualization
-fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-fig.suptitle(f'Event Study: {event_name}', fontsize=16)
-
-# Plot 1: Daily Trading Volume
-ax1 = axes[0, 0]
-ax1.plot(event_study_result['Days_from_event'], event_study_result['Total_Volume']/1e6, 
-         marker='o', markersize=4)
-ax1.axvline(x=0, color='red', linestyle='--', label='Event Date')
-ax1.set_xlabel('Days from Event')
-ax1.set_ylabel('Trading Volume (Million $)')
-ax1.set_title('Daily Trading Volume')
-ax1.legend()
-ax1.grid(True, alpha=0.3)
-
-# Plot 2: Net Position
-ax2 = axes[0, 1]
-colors = ['green' if x > 0 else 'red' for x in event_study_result['Net_Position']]
-ax2.bar(event_study_result['Days_from_event'], event_study_result['Net_Position']/1e6, 
-        color=colors, alpha=0.7)
-ax2.axvline(x=0, color='red', linestyle='--', label='Event Date')
-ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-ax2.set_xlabel('Days from Event')
-ax2.set_ylabel('Net Position (Million $)')
-ax2.set_title('Daily Net Position (Buy - Sell)')
-ax2.legend()
-ax2.grid(True, alpha=0.3)
-
-# Plot 3: Cumulative Abnormal Volume
-ax3 = axes[1, 0]
-ax3.plot(event_study_result['Days_from_event'], event_study_result['CAV']/1e6, 
-         marker='o', markersize=4, color='blue')
-ax3.axvline(x=0, color='red', linestyle='--', label='Event Date')
-ax3.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-ax3.set_xlabel('Days from Event')
-ax3.set_ylabel('Cumulative Abnormal Volume (Million $)')
-ax3.set_title('Cumulative Abnormal Trading Volume')
-ax3.legend()
-ax3.grid(True, alpha=0.3)
-
-# Plot 4: Trade Count
-ax4 = axes[1, 1]
-ax4.bar(event_study_result['Days_from_event'], event_study_result['Trade_Count'], 
-        color='skyblue', alpha=0.7)
-ax4.axvline(x=0, color='red', linestyle='--', label='Event Date')
-ax4.set_xlabel('Days from Event')
-ax4.set_ylabel('Number of Trades')
-ax4.set_title('Daily Trade Count')
-ax4.legend()
-ax4.grid(True, alpha=0.3)
-
-plt.tight_layout()
+event_study_result = perform_event_study(df, event_date, window_pre=30, window_post=40)
+event_fig = create_event_study_plot(event_study_result, event_name)
 plt.savefig('april_event_study.png', dpi=300, bbox_inches='tight')
 plt.close()
 
-print(f"Trading volume change: {event_study_result['Abnormal_Volume'].sum()/1e6:.2f}M")
-print(f"Net position change: {event_study_result['Abnormal_Net'].sum()/1e6:.2f}M")
+print(f"Trading volume change: {event_study_result['Abnormal_Amount'].sum()/1e6:.2f}M")
+print(f"Maximum daily impact: {event_study_result['Abnormal_Amount'].max()/1e6:.2f}M")
 
 # 2. Portfolio Shift Analysis
 print("\n2. PORTFOLIO COMPOSITION SHIFT")
@@ -313,6 +777,9 @@ print("-" * 40)
 portfolio_shift = portfolio_shift_analysis(df, event_date)
 print("\nSecurity Type Distribution Changes:")
 print(portfolio_shift)
+
+shift_fig = create_portfolio_shift_visualization(portfolio_shift)
+shift_fig.write_html('april_portfolio_shift.html')
 
 # 3. Statistical Significance Tests
 print("\n3. STATISTICAL SIGNIFICANCE TESTS")
@@ -327,76 +794,78 @@ print(f"  Change: {stat_results['Volume_Change']['percent_change']:.1f}%")
 print(f"  T-statistic: {stat_results['Volume_Change']['t_statistic']:.3f}")
 print(f"  P-value: {stat_results['Volume_Change']['p_value']:.4f}")
 
+print("\nNet Position Change Test:")
+print(f"  Pre-period mean: ${stat_results['Net_Position_Change']['pre_mean']/1e6:.2f}M")
+print(f"  Post-period mean: ${stat_results['Net_Position_Change']['post_mean']/1e6:.2f}M")
+print(f"  T-statistic: {stat_results['Net_Position_Change']['t_statistic']:.3f}")
+print(f"  P-value: {stat_results['Net_Position_Change']['p_value']:.4f}")
+
 print("\nSecurity Distribution Test:")
 print(f"  Chi-square statistic: {stat_results['Security_Distribution']['chi2_statistic']:.3f}")
 print(f"  P-value: {stat_results['Security_Distribution']['p_value']:.4f}")
-
-if 'Customer_Behavior' in stat_results:
-    print("\nCustomer Behavior Test (Wilcoxon):")
-    print(f"  Number of customers: {stat_results['Customer_Behavior']['n_customers']}")
-    print(f"  Wilcoxon statistic: {stat_results['Customer_Behavior']['wilcoxon_statistic']:.3f}")
-    print(f"  P-value: {stat_results['Customer_Behavior']['p_value']:.4f}")
+print(f"  Degrees of freedom: {stat_results['Security_Distribution']['degrees_of_freedom']}")
 
 # 4. Customer Clustering Analysis
 print("\n4. CUSTOMER SEGMENTATION ANALYSIS")
 print("-" * 40)
 
 customer_clusters = customer_behavior_clustering(df, event_date)
-cluster_summary = customer_clusters.groupby('Cluster').agg({
-    'Volume_Change_%': ['mean', 'std'],
-    'Net_Position_Change': ['mean', 'std'],
+cluster_summary = customer_clusters.groupby('Cluster_Name').agg({
+    'Foreign_Change_%': 'mean',
+    'Volume_Change_%': 'mean',
     'Customer': 'count'
 }).round(2)
 
 print("\nCustomer Segment Characteristics:")
 print(cluster_summary)
 
-# 5. Seasonality Check with 2024
-print("\n5. SEASONALITY ANALYSIS - 2024 vs 2025 Comparison")
+cluster_fig = create_customer_clustering_plot(customer_clusters)
+plt.savefig('april_customer_clusters.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# 5. Industry Impact Analysis
+print("\n5. INDUSTRY IMPACT ANALYSIS")
 print("-" * 40)
 
-event_2025 = pd.Timestamp('2025-04-02')
-event_2024 = pd.Timestamp('2024-04-02')
-window_days = 30
+industry_fig = create_industry_heatmap(df, event_date)
+plt.savefig('april_industry_heatmap.png', dpi=300, bbox_inches='tight')
+plt.close()
 
-# Compare with 2024 same period
-def get_period_metrics(df, center_date, window):
-    start_date = center_date - timedelta(days=window)
-    end_date = center_date + timedelta(days=window)
-    
-    pre_data = df[(df['Date'] >= start_date) & (df['Date'] < center_date)]
-    post_data = df[(df['Date'] >= center_date) & (df['Date'] <= end_date)]
-    
-    # Calculate metrics
-    pre_volume = pre_data['Abs_Amount'].sum()
-    post_volume = post_data['Abs_Amount'].sum()
-    volume_change = ((post_volume - pre_volume) / pre_volume * 100) if pre_volume > 0 else 0
-    
-    return {
-        'pre_volume': pre_volume,
-        'post_volume': post_volume,
-        'volume_change_%': volume_change
-    }
+# 6. Time Series Analysis with 99th Percentile Outlier Removal
+print("\n6. TIME SERIES PATTERNS")
+print("-" * 40)
 
-metrics_2024 = get_period_metrics(df, event_2024, window_days)
-metrics_2025 = get_period_metrics(df, event_2025, window_days)
+# Daily aggregation
+daily_metrics = df.groupby('Date').agg({
+    'Net_Amount': ['sum', 'count', 'mean']
+}).reset_index()
 
-print(f"\nApril Period Comparison:")
-print(f"\n2024 (Same period):")
-print(f"  Pre-period volume: ${metrics_2024['pre_volume']/1e6:.2f}M")
-print(f"  Post-period volume: ${metrics_2024['post_volume']/1e6:.2f}M")
-print(f"  Volume change: {metrics_2024['volume_change_%']:.1f}%")
+daily_metrics.columns = ['Date', 'Total_Net_Amount', 'Trade_Count', 'Avg_Net_Amount']
 
-print(f"\n2025 (Event year):")
-print(f"  Pre-period volume: ${metrics_2025['pre_volume']/1e6:.2f}M")
-print(f"  Post-period volume: ${metrics_2025['post_volume']/1e6:.2f}M")
-print(f"  Volume change: {metrics_2025['volume_change_%']:.1f}%")
+# Remove outliers using 99th percentile instead of IQR
+lower_bound = daily_metrics['Total_Net_Amount'].quantile(0.01)
+upper_bound = daily_metrics['Total_Net_Amount'].quantile(0.99)
 
-print(f"\nDifference-in-Differences:")
-print(f"  2025 change - 2024 change = {metrics_2025['volume_change_%'] - metrics_2024['volume_change_%']:.1f}%")
-print(f"  This is the TRUE event impact after controlling for seasonality")
+# Cap outliers at 99th percentile
+daily_metrics['Total_Net_Amount_cleaned'] = daily_metrics['Total_Net_Amount'].clip(
+    lower=lower_bound, upper=upper_bound
+)
 
-print("\n" + "=" * 60)
-print("Analysis complete. Generated files:")
-print("- april_event_study.png")
-print("=" * 60)
+# Calculate rolling averages on cleaned data
+daily_metrics['MA_7'] = daily_metrics['Total_Net_Amount_cleaned'].rolling(window=7, center=True).mean()
+daily_metrics['MA_30'] = daily_metrics['Total_Net_Amount_cleaned'].rolling(window=30, center=True).mean()
+
+# Plot time series
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
+
+# Net trading amount
+ax1.plot(daily_metrics['Date'], daily_metrics['Total_Net_Amount_cleaned']/1e6, 
+         alpha=0.3, label='Daily (99th percentile capped)', linewidth=0.5)
+ax1.plot(daily_metrics['Date'], daily_metrics['MA_7']/1e6, label='7-day MA', linewidth=2)
+ax1.plot(daily_metrics['Date'], daily_metrics['MA_30']/1e6, label='30-day MA', linewidth=2)
+ax1.axvline(x=apr_event, color='red', linestyle='--', label='April 2nd Event', linewidth=2)
+ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+ax1.set_ylabel('Net Trading Amount (Million $)')
+ax1.set_title('Net Trading Amount Time Series (Outliers Capped at 99th Percentile)')
+ax1.legend()
+ax1.grid(True, alpha=0.3
