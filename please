@@ -1,3 +1,282 @@
+
+# --- 2. Define Time Periods ---
+print("--- Defining Time Periods ---")
+tariff_date = pd.Timestamp('2025-04-02')
+pre_days = 30
+post_days = 30
+
+all_business_days = pd.date_range(start='2023-01-01', end='2025-05-29', freq='B')
+tariff_idx = all_business_days.get_loc(tariff_date)
+
+pre_2025_start_idx = max(0, tariff_idx - pre_days)
+pre_2025_start_date = all_business_days[pre_2025_start_idx]
+pre_2025_end_date = tariff_date - pd.Timedelta(days=1)
+
+post_2025_end_idx = min(len(all_business_days) - 1, tariff_idx + post_days - 1)
+post_2025_end_date = all_business_days[post_2025_end_idx]
+post_2025_start_date = tariff_date
+
+pre_2024_start_date = pre_2025_start_date - pd.DateOffset(years=1)
+pre_2024_end_date = pre_2025_end_date - pd.DateOffset(years=1)
+post_2024_start_date = post_2025_start_date - pd.DateOffset(years=1)
+post_2024_end_date = post_2025_end_date - pd.DateOffset(years=1)
+
+periods = {
+    'pre_2025': (pre_2025_start_date, pre_2025_end_date),
+    'post_2025': (post_2025_start_date, post_2025_end_date),
+    'pre_2024': (pre_2024_start_date, pre_2024_end_date),
+    'post_2024': (post_2024_start_date, post_2024_end_date),
+}
+
+for name, (start, end) in periods.items():
+    print(f"{name.replace('_', ' ').title()}: {start.date()} to {end.date()}")
+
+# --- 3. OPTIMIZED: Single Aggregation for All Analyses ---
+print("\n--- Optimized Aggregation for All Analyses ---")
+start_time = time.time()
+
+# Create period indicators for efficient filtering
+def assign_period(date):
+    for period_name, (start_date, end_date) in periods.items():
+        if start_date <= date <= end_date:
+            return period_name
+    return None
+
+# Filter data to only relevant periods first
+df_filtered = df[df['Date'].apply(assign_period).notna()].copy()
+df_filtered['Period'] = df_filtered['Date'].apply(assign_period)
+
+print(f"Filtered data from {len(df)} to {len(df_filtered)} rows for analysis periods")
+
+# Single comprehensive aggregation
+# Group by Customer, Period, Security_Type, and Industry to get all combinations at once
+agg_data = df_filtered.groupby([
+    'Customer_Name', 'Customer_Industry', 'Period', 'Security_Type'
+])['Amount'].sum().reset_index()
+
+print(f"Aggregation completed in {time.time() - start_time:.2f} seconds")
+
+# --- 4. Overall Net Buy Analysis (Same as before) ---
+print("\n--- 4. Overall Net Buy Analysis ---")
+
+# Pivot to get customer-period level data
+customer_period = df_filtered.groupby(['Customer_Name', 'Period'])['Amount'].sum().reset_index()
+customer_period_pivot = customer_period.pivot(index='Customer_Name', columns='Period', values='Amount').fillna(0)
+
+# Calculate changes
+customer_period_pivot['Change_2025'] = customer_period_pivot['post_2025'] - customer_period_pivot['pre_2025']
+customer_period_pivot['Change_2024'] = customer_period_pivot['post_2024'] - customer_period_pivot['pre_2024']
+
+# Statistical tests
+t_stat, p_value = stats.ttest_ind(customer_period_pivot['Change_2025'], 
+                                  customer_period_pivot['Change_2024'], 
+                                  equal_var=False)
+
+# Descriptive statistics for intuitive interpretation
+avg_pre_2025 = customer_period_pivot['pre_2025'].mean()
+avg_post_2025 = customer_period_pivot['post_2025'].mean()
+avg_change_2025 = customer_period_pivot['Change_2025'].mean()
+avg_change_2024 = customer_period_pivot['Change_2024'].mean()
+
+print("=== OVERALL NET BUY SUMMARY ===")
+print(f"2025 Before Tariff (Average): ${avg_pre_2025:,.0f}")
+print(f"2025 After Tariff (Average): ${avg_post_2025:,.0f}")
+print(f"2025 Change (After - Before): ${avg_change_2025:,.0f}")
+print(f"2024 Change (Same Period): ${avg_change_2024:,.0f}")
+print(f"DiD Effect (2025 Change - 2024 Change): ${avg_change_2025 - avg_change_2024:,.2f}")
+print(f"T-statistic: {t_stat:.3f}")
+print(f"P-value: {p_value:.4f}")
+
+if p_value < 0.05:
+    print("Conclusion: Significant change in net buy post-tariff beyond seasonal trends.")
+else:
+    print("Conclusion: No significant difference beyond normal seasonality.")
+
+# --- 5. OPTIMIZED Security Type Analysis ---
+print("\n--- 5. Optimized Security Type Analysis ---")
+start_time = time.time()
+
+# Pivot aggregated data to get customer-period-security level
+sec_pivot = agg_data.pivot_table(
+    index=['Customer_Name'], 
+    columns=['Period', 'Security_Type'], 
+    values='Amount', 
+    fill_value=0
+)
+
+# Get all unique customers for consistent indexing
+all_customers = customer_period_pivot.index
+
+security_type_results = []
+
+for sec_type in security_types:
+    try:
+        # Create DataFrame with proper index from all customers
+        sec_data_dict = {}
+        
+        for period in ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']:
+            if ('Period' in sec_pivot.columns.names and 'Security_Type' in sec_pivot.columns.names and 
+                (period, sec_type) in sec_pivot.columns):
+                sec_data_dict[period] = sec_pivot[(period, sec_type)]
+            else:
+                # Create a Series with zeros for all customers
+                sec_data_dict[period] = pd.Series(0, index=all_customers)
+        
+        sec_data = pd.DataFrame(sec_data_dict)
+        
+        sec_data['Change_2025'] = sec_data['post_2025'] - sec_data['pre_2025']
+        sec_data['Change_2024'] = sec_data['post_2024'] - sec_data['pre_2024']
+        
+        # Filter active customers for this security type
+        active_mask = (sec_data[['pre_2024', 'post_2024', 'pre_2025', 'post_2025']] != 0).any(axis=1)
+        active_sec_data = sec_data[active_mask]
+        
+        # Calculate descriptive statistics for interpretation
+        avg_pre_2025_sec = active_sec_data['pre_2025'].mean()
+        avg_post_2025_sec = active_sec_data['post_2025'].mean()
+        avg_change_2025_sec = active_sec_data['Change_2025'].mean()
+        avg_change_2024_sec = active_sec_data['Change_2024'].mean()
+        
+        if len(active_sec_data) > 1:
+            t_stat, p_value = stats.ttest_ind(active_sec_data['Change_2025'], 
+                                              active_sec_data['Change_2024'], 
+                                              equal_var=False)
+            did_effect = avg_change_2025_sec - avg_change_2024_sec
+        else:
+            t_stat, p_value, did_effect = np.nan, np.nan, 0
+            
+        security_type_results.append({
+            'Security_Type': sec_type,
+            'Pre_2025_Avg': avg_pre_2025_sec,
+            'Post_2025_Avg': avg_post_2025_sec,
+            'Change_2025_Avg': avg_change_2025_sec,
+            'Change_2024_Avg': avg_change_2024_sec,
+            'DiD_Effect_Mean': did_effect,
+            'T_Statistic': t_stat,
+            'P_Value': p_value,
+            'Active_Customers': len(active_sec_data)
+        })
+        
+    except Exception as e:
+        print(f"Error processing {sec_type}: {e}")
+        security_type_results.append({
+            'Security_Type': sec_type,
+            'Pre_2025_Avg': 0,
+            'Post_2025_Avg': 0,
+            'Change_2025_Avg': 0,
+            'Change_2024_Avg': 0,
+            'DiD_Effect_Mean': 0,
+            'T_Statistic': np.nan,
+            'P_Value': np.nan,
+            'Active_Customers': 0
+        })
+
+print("\n=== SECURITY TYPE DETAILED RESULTS ===")
+sec_results_df = pd.DataFrame(security_type_results)
+print(sec_results_df[['Security_Type', 'Pre_2025_Avg', 'Post_2025_Avg', 'Change_2025_Avg', 'DiD_Effect_Mean', 'P_Value', 'Active_Customers']].round(0))
+
+print("\nSecurity Type Interpretations:")
+for _, row in sec_results_df.iterrows():
+    if pd.notna(row['P_Value']) and row['P_Value'] < 0.05:
+        direction = "increased" if row['Change_2025_Avg'] > 0 else "decreased"
+        print(f"  - {row['Security_Type']}: SIGNIFICANT IMPACT")
+        print(f"    • Before Tariff: ${row['Pre_2025_Avg']:,.0f} | After Tariff: ${row['Post_2025_Avg']:,.0f}")
+        print(f"    • Net buy {direction} by ${abs(row['Change_2025_Avg']):,.0f} (DiD: ${row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
+    elif row['Active_Customers'] < 2:
+        print(f"  - {row['Security_Type']}: Insufficient data ({row['Active_Customers']} active customers)")
+    else:
+        print(f"  - {row['Security_Type']}: No significant impact (p={row['P_Value']:.4f})")
+
+# --- 6. OPTIMIZED Industry Analysis ---
+print("\n--- 6. Optimized Industry Analysis ---")
+start_time = time.time()
+
+# Get customer-industry mapping - handle potential duplicates
+customer_industry_df = df[['Customer_Name', 'Customer_Industry']].drop_duplicates()
+
+# Check for customers with multiple industries (data quality issue)
+customer_counts = customer_industry_df['Customer_Name'].value_counts()
+if (customer_counts > 1).any():
+    print(f"Warning: {(customer_counts > 1).sum()} customers have multiple industries. Using first occurrence.")
+    # Keep only the first occurrence for each customer
+    customer_industry_df = customer_industry_df.drop_duplicates(subset=['Customer_Name'], keep='first')
+
+customer_industry_map = customer_industry_df.set_index('Customer_Name')['Customer_Industry']
+
+# Add industry info to customer_period_pivot
+customer_period_with_industry = customer_period_pivot.copy()
+customer_period_with_industry = customer_period_with_industry.reset_index()  # Reset index to make Customer_Name a column
+customer_period_with_industry['Industry'] = customer_period_with_industry['Customer_Name'].map(customer_industry_map)
+
+industry_results = []
+
+for industry in industries:
+    industry_data = customer_period_with_industry[customer_period_with_industry['Industry'] == industry]
+    
+    if len(industry_data) == 0:
+        industry_results.append({
+            'Industry': industry,
+            'Pre_2025_Avg': 0,
+            'Post_2025_Avg': 0,
+            'Change_2025_Avg': 0,
+            'Change_2024_Avg': 0,
+            'DiD_Effect_Mean': 0,
+            'T_Statistic': np.nan,
+            'P_Value': np.nan,
+            'Active_Customers': 0
+        })
+        continue
+    
+    # Filter active customers
+    active_cols = ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']
+    active_mask = (industry_data[active_cols] != 0).any(axis=1)
+    active_industry_data = industry_data[active_mask]
+    
+    # Calculate descriptive statistics
+    avg_pre_2025_ind = active_industry_data['pre_2025'].mean() if len(active_industry_data) > 0 else 0
+    avg_post_2025_ind = active_industry_data['post_2025'].mean() if len(active_industry_data) > 0 else 0
+    avg_change_2025_ind = active_industry_data['Change_2025'].mean() if len(active_industry_data) > 0 else 0
+    avg_change_2024_ind = active_industry_data['Change_2024'].mean() if len(active_industry_data) > 0 else 0
+    
+    if len(active_industry_data) > 1:
+        t_stat, p_value = stats.ttest_ind(active_industry_data['Change_2025'], 
+                                          active_industry_data['Change_2024'], 
+                                          equal_var=False)
+        did_effect = avg_change_2025_ind - avg_change_2024_ind
+    else:
+        t_stat, p_value, did_effect = np.nan, np.nan, 0
+        
+    industry_results.append({
+        'Industry': industry,
+        'Pre_2025_Avg': avg_pre_2025_ind,
+        'Post_2025_Avg': avg_post_2025_ind,
+        'Change_2025_Avg': avg_change_2025_ind,
+        'Change_2024_Avg': avg_change_2024_ind,
+        'DiD_Effect_Mean': did_effect,
+        'T_Statistic': t_stat,
+        'P_Value': p_value,
+        'Active_Customers': len(active_industry_data)
+    })
+
+ind_results_df = pd.DataFrame(industry_results)
+print(f"Industry analysis completed in {time.time() - start_time:.2f} seconds")
+print(ind_results_df.round(4))
+
+print("\nIndustry Interpretations:")
+for _, row in ind_results_df.iterrows():
+    if pd.notna(row['P_Value']) and row['P_Value'] < 0.05:
+        print(f"  - {row['Industry']}: Significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
+    elif row['Active_Customers'] < 2:
+        print(f"  - {row['Industry']}: Insufficient data ({row['Active_Customers']} active customers)")
+    else:
+        print(f"  - {row['Industry']}: No significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
+
+print("\n--- Analysis Complete ---")
+
+
+
+
+#### NEW
 import pandas as pd
 import numpy as np
 from scipy import stats
