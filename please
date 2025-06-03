@@ -585,250 +585,204 @@ print("\n--- Analysis Complete ---")
 
 
 
-#######
-# --- 7. COMPREHENSIVE VISUALIZATIONS FOR PRESENTATION ---
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import plotly.figure_factory as ff
+# --- 7. VISUALIZATION FOR PPT ---
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.patches import Rectangle
 
-print("\n--- Creating Comprehensive Presentation Visualizations ---")
+# Set style for professional charts
+plt.style.use('default')
+sns.set_palette("husl")
 
-# === SLIDE 3: OVERALL ANALYSIS - 4 CHARTS ===
-print("Creating Overall Analysis Dashboard...")
+# --- Security Type Visualizations ---
+print("\n--- Creating Security Type Visualizations ---")
 
-# Chart 3A: Time Series Comparison
-daily_data = df_filtered.groupby(['Date', 'Period'])['Amount'].sum().reset_index()
-daily_pivot = daily_data.pivot(index='Date', columns='Period', values='Amount').fillna(0)
+# Filter significant security types and top 7 by absolute change
+sec_significant = sec_results_df[
+    (pd.notna(sec_results_df['P_Value'])) & 
+    (sec_results_df['P_Value'] < 0.05) & 
+    (sec_results_df['Active_Customers'] >= 2)
+].copy()
 
-fig_overall_time = go.Figure()
-fig_overall_time.add_trace(go.Scatter(x=daily_pivot.index[daily_pivot['pre_2024'].notna()], y=daily_pivot['pre_2024'].dropna(), 
-                                     mode='lines', name='2024 Pre', line=dict(color='lightblue', width=2)))
-fig_overall_time.add_trace(go.Scatter(x=daily_pivot.index[daily_pivot['post_2024'].notna()], y=daily_pivot['post_2024'].dropna(), 
-                                     mode='lines', name='2024 Post', line=dict(color='blue', width=2)))
-fig_overall_time.add_trace(go.Scatter(x=daily_pivot.index[daily_pivot['pre_2025'].notna()], y=daily_pivot['pre_2025'].dropna(), 
-                                     mode='lines', name='2025 Pre', line=dict(color='lightcoral', width=2)))
-fig_overall_time.add_trace(go.Scatter(x=daily_pivot.index[daily_pivot['post_2025'].notna()], y=daily_pivot['post_2025'].dropna(), 
-                                     mode='lines', name='2025 Post', line=dict(color='red', width=3)))
-fig_overall_time.add_vline(x=tariff_date, line_dash="dash", line_color="black", annotation_text="Tariff", annotation_position="top")
-fig_overall_time.update_layout(title="Daily Net Buy Trends", xaxis_title="Date", yaxis_title="Daily Net Buy ($)", 
-                               template='plotly_white', height=300, showlegend=True)
+if len(sec_significant) > 0:
+    # Add percentage change calculation
+    sec_significant['Pct_Change'] = ((sec_significant['Post_2025_Avg'] - sec_significant['Pre_2025_Avg']) / 
+                                   sec_significant['Pre_2025_Avg'].abs() * 100)
+    sec_significant['Abs_Change'] = sec_significant['Post_2025_Avg'] - sec_significant['Pre_2025_Avg']
+    
+    # Select top 7 by absolute change magnitude
+    sec_plot_data = sec_significant.nlargest(7, sec_significant['Abs_Change'].abs())
+    
+    # Chart 1: Before vs After with Percentage Change
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # Before vs After Bar Chart
+    x_pos = range(len(sec_plot_data))
+    width = 0.35
+    
+    bars1 = ax1.bar([x - width/2 for x in x_pos], sec_plot_data['Pre_2025_Avg']/1000, 
+                    width, label='Before Tariff', color='lightblue', alpha=0.8)
+    bars2 = ax1.bar([x + width/2 for x in x_pos], sec_plot_data['Post_2025_Avg']/1000, 
+                    width, label='After Tariff', color='coral', alpha=0.8)
+    
+    ax1.set_xlabel('Security Type', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Average Net Buy (Thousands $)', fontsize=12, fontweight='bold')
+    ax1.set_title('Net Buy: Before vs After Tariff by Security Type', fontsize=14, fontweight='bold')
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(sec_plot_data['Security_Type'], rotation=45, ha='right')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Add percentage change labels
+    for i, (idx, row) in enumerate(sec_plot_data.iterrows()):
+        pct_change = row['Pct_Change']
+        color = 'green' if pct_change > 0 else 'red'
+        max_val = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000
+        ax1.text(i, max_val + abs(max_val) * 0.1,
+                f'{pct_change:+.1f}%', ha='center', va='bottom', 
+                fontweight='bold', color=color, fontsize=10)
+    
+    # Chart 2: DiD Effects
+    colors = ['green' if x > 0 else 'red' for x in sec_plot_data['DiD_Effect_Mean']]
+    bars = ax2.bar(range(len(sec_plot_data)), sec_plot_data['DiD_Effect_Mean']/1000, 
+                   color=colors, alpha=0.7)
+    
+    ax2.set_xlabel('Security Type', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('DiD Effect (Thousands $)', fontsize=12, fontweight='bold')
+    ax2.set_title('Difference-in-Differences Impact by Security Type', fontsize=14, fontweight='bold')
+    ax2.set_xticks(range(len(sec_plot_data)))
+    ax2.set_xticklabels(sec_plot_data['Security_Type'], rotation=45, ha='right')
+    ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+    ax2.grid(axis='y', alpha=0.3)
+    
+    # Add significance markers
+    for i, (idx, row) in enumerate(sec_plot_data.iterrows()):
+        if row['P_Value'] < 0.001:
+            marker = '***'
+        elif row['P_Value'] < 0.01:
+            marker = '**'
+        elif row['P_Value'] < 0.05:
+            marker = '*'
+        else:
+            marker = ''
+        
+        y_pos = row['DiD_Effect_Mean']/1000
+        y_range = max(sec_plot_data['DiD_Effect_Mean'].max(), abs(sec_plot_data['DiD_Effect_Mean'].min()))/1000
+        offset = 0.05 * y_range
+        ax2.text(i, y_pos + offset if y_pos >= 0 else y_pos - offset, 
+                marker, ha='center', va='bottom' if y_pos >= 0 else 'top', 
+                fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('security_type_analysis.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
-# Chart 3B: Before/After Box Plots
-box_data = pd.DataFrame({
-    'Period': ['2024 Pre', '2024 Post', '2025 Pre', '2025 Post'],
-    'Mean_NetBuy': [
-        customer_period_pivot['pre_2024'].mean(),
-        customer_period_pivot['post_2024'].mean(),
-        customer_period_pivot['pre_2025'].mean(),
-        customer_period_pivot['post_2025'].mean()
-    ],
-    'Values': [
-        customer_period_pivot['pre_2024'].tolist(),
-        customer_period_pivot['post_2024'].tolist(),
-        customer_period_pivot['pre_2025'].tolist(),
-        customer_period_pivot['post_2025'].tolist()
-    ]
-})
+else:
+    print("No significant security type changes found for visualization")
 
-fig_overall_box = go.Figure()
-colors = ['lightblue', 'blue', 'lightcoral', 'red']
-for i, period in enumerate(['pre_2024', 'post_2024', 'pre_2025', 'post_2025']):
-    fig_overall_box.add_trace(go.Box(y=customer_period_pivot[period], name=period.replace('_', ' ').title(), 
-                                    marker_color=colors[i], boxmean=True))
-fig_overall_box.update_layout(title="Customer Net Buy Distribution", yaxis_title="Net Buy ($)", 
-                             template='plotly_white', height=300)
+# --- Industry Visualizations ---
+print("\n--- Creating Industry Visualizations ---")
 
-# Chart 3C: Change Distribution Histogram
-fig_overall_hist = go.Figure()
-fig_overall_hist.add_trace(go.Histogram(x=customer_period_pivot['Change_2024'], name='2024 Change', 
-                                       opacity=0.7, marker_color='blue', nbinsx=30))
-fig_overall_hist.add_trace(go.Histogram(x=customer_period_pivot['Change_2025'], name='2025 Change', 
-                                       opacity=0.7, marker_color='red', nbinsx=30))
-fig_overall_hist.update_layout(title="Distribution of Customer Changes", xaxis_title="Net Buy Change ($)", 
-                              yaxis_title="Number of Customers", barmode='overlay', template='plotly_white', height=300)
+# Filter significant industries and top 7 by absolute change
+ind_significant = ind_results_df[
+    (pd.notna(ind_results_df['P_Value'])) & 
+    (ind_results_df['P_Value'] < 0.05) & 
+    (ind_results_df['Active_Customers'] >= 2)
+].copy()
 
-# Chart 3D: Statistical Summary
-fig_overall_stats = go.Figure(data=[go.Table(
-    header=dict(values=['Metric', '2024 Change', '2025 Change', 'Difference', 'P-Value'],
-                fill_color='lightblue', align='center', font_size=12),
-    cells=dict(values=[
-        ['Mean Change', 'Std Dev', 'Median', 'Active Customers'],
-        [f"${customer_period_pivot['Change_2024'].mean():,.0f}", 
-         f"${customer_period_pivot['Change_2024'].std():,.0f}",
-         f"${customer_period_pivot['Change_2024'].median():,.0f}",
-         f"{len(customer_period_pivot)}"],
-        [f"${customer_period_pivot['Change_2025'].mean():,.0f}", 
-         f"${customer_period_pivot['Change_2025'].std():,.0f}",
-         f"${customer_period_pivot['Change_2025'].median():,.0f}",
-         f"{len(customer_period_pivot)}"],
-        [f"${customer_period_pivot['Change_2025'].mean() - customer_period_pivot['Change_2024'].mean():,.0f}",
-         "N/A", "N/A", "Same"],
-        ["0.5766", "N/A", "N/A", "Not Significant"]
-    ], fill_color='white', align='center', font_size=10))
-])
-fig_overall_stats.update_layout(title="Statistical Summary", height=300, template='plotly_white')
+if len(ind_significant) > 0:
+    # Add percentage change calculation
+    ind_significant['Pct_Change'] = ((ind_significant['Post_2025_Avg'] - ind_significant['Pre_2025_Avg']) / 
+                                   ind_significant['Pre_2025_Avg'].abs() * 100)
+    ind_significant['Abs_Change'] = ind_significant['Post_2025_Avg'] - ind_significant['Pre_2025_Avg']
+    
+    # Select top 7 by absolute change magnitude
+    ind_plot_data = ind_significant.nlargest(7, ind_significant['Abs_Change'].abs())
+    
+    # Chart 1: Before vs After with Percentage Change
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # Before vs After Bar Chart
+    x_pos = range(len(ind_plot_data))
+    width = 0.35
+    
+    bars1 = ax1.bar([x - width/2 for x in x_pos], ind_plot_data['Pre_2025_Avg']/1000, 
+                    width, label='Before Tariff', color='lightgreen', alpha=0.8)
+    bars2 = ax1.bar([x + width/2 for x in x_pos], ind_plot_data['Post_2025_Avg']/1000, 
+                    width, label='After Tariff', color='orange', alpha=0.8)
+    
+    ax1.set_xlabel('Industry', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Average Net Buy (Thousands $)', fontsize=12, fontweight='bold')
+    ax1.set_title('Net Buy: Before vs After Tariff by Industry', fontsize=14, fontweight='bold')
+    ax1.set_xticks(x_pos)
+    # Truncate long industry names for better display
+    industry_labels = [name[:20] + '...' if len(name) > 20 else name for name in ind_plot_data['Industry']]
+    ax1.set_xticklabels(industry_labels, rotation=45, ha='right')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Add percentage change labels
+    for i, (idx, row) in enumerate(ind_plot_data.iterrows()):
+        pct_change = row['Pct_Change']
+        color = 'green' if pct_change > 0 else 'red'
+        max_val = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000
+        ax1.text(i, max_val + abs(max_val) * 0.1,
+                f'{pct_change:+.1f}%', ha='center', va='bottom', 
+                fontweight='bold', color=color, fontsize=10)
+    
+    # Chart 2: DiD Effects
+    colors = ['green' if x > 0 else 'red' for x in ind_plot_data['DiD_Effect_Mean']]
+    bars = ax2.bar(range(len(ind_plot_data)), ind_plot_data['DiD_Effect_Mean']/1000, 
+                   color=colors, alpha=0.7)
+    
+    ax2.set_xlabel('Industry', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('DiD Effect (Thousands $)', fontsize=12, fontweight='bold')
+    ax2.set_title('Difference-in-Differences Impact by Industry', fontsize=14, fontweight='bold')
+    ax2.set_xticks(range(len(ind_plot_data)))
+    ax2.set_xticklabels(industry_labels, rotation=45, ha='right')
+    ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+    ax2.grid(axis='y', alpha=0.3)
+    
+    # Add significance markers
+    for i, (idx, row) in enumerate(ind_plot_data.iterrows()):
+        if row['P_Value'] < 0.001:
+            marker = '***'
+        elif row['P_Value'] < 0.01:
+            marker = '**'
+        elif row['P_Value'] < 0.05:
+            marker = '*'
+        else:
+            marker = ''
+        
+        y_pos = row['DiD_Effect_Mean']/1000
+        y_range = max(ind_plot_data['DiD_Effect_Mean'].max(), abs(ind_plot_data['DiD_Effect_Mean'].min()))/1000
+        offset = 0.05 * y_range
+        ax2.text(i, y_pos + offset if y_pos >= 0 else y_pos - offset, 
+                marker, ha='center', va='bottom' if y_pos >= 0 else 'top', 
+                fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('industry_analysis.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
-# Show all overall charts
-fig_overall_time.show()
-fig_overall_box.show() 
-fig_overall_hist.show()
-fig_overall_stats.show()
+else:
+    print("No significant industry changes found for visualization")
 
-# === SLIDE 4: SECURITY TYPE ANALYSIS - 4 CHARTS ===
-print("Creating Security Type Analysis Dashboard...")
+# --- Summary Stats for Charts ---
+print("\n=== CHART SUMMARY ===")
+if len(sec_significant) > 0:
+    print(f"Security Types Chart: {len(sec_plot_data)} significant types visualized")
+    print("Security types with largest impacts:")
+    for _, row in sec_plot_data.head(3).iterrows():
+        print(f"  - {row['Security_Type']}: {row['Pct_Change']:+.1f}% change, DiD: ${row['DiD_Effect_Mean']:,.0f}")
 
-# Chart 4A: Impact Bar Chart (Significant Only)
-sig_security = sec_results_df[sec_results_df['P_Value'] < 0.05].copy()
-sig_security = sig_security.sort_values('DiD_Effect_Mean')
-colors_sec = ['red' if x < 0 else 'green' for x in sig_security['DiD_Effect_Mean']]
+if len(ind_significant) > 0:
+    print(f"\nIndustry Chart: {len(ind_plot_data)} significant industries visualized")
+    print("Industries with largest impacts:")
+    for _, row in ind_plot_data.head(3).iterrows():
+        print(f"  - {row['Industry'][:30]}: {row['Pct_Change']:+.1f}% change, DiD: ${row['DiD_Effect_Mean']:,.0f}")
 
-fig_sec_impact = go.Figure(data=[go.Bar(x=sig_security['DiD_Effect_Mean'], y=sig_security['Security_Type'], 
-                                       orientation='h', marker_color=colors_sec,
-                                       text=[f"${x:,.0f}" for x in sig_security['DiD_Effect_Mean']], textposition='outside')])
-fig_sec_impact.add_vline(x=0, line_dash="dot", line_color="gray")
-fig_sec_impact.update_layout(title="Significant Security Type Impacts", xaxis_title="Net Buy Change ($)", 
-                            template='plotly_white', height=350)
-
-# Chart 4B: P-Values Significance Chart
-fig_sec_pval = go.Figure()
-all_sec = sec_results_df.sort_values('P_Value')
-colors_pval = ['red' if x < 0.05 else 'gray' for x in all_sec['P_Value']]
-fig_sec_pval.add_trace(go.Bar(x=all_sec['Security_Type'], y=all_sec['P_Value'], marker_color=colors_pval,
-                             text=[f"{x:.3f}" for x in all_sec['P_Value']], textposition='outside'))
-fig_sec_pval.add_hline(y=0.05, line_dash="dash", line_color="red", annotation_text="Significance Threshold")
-fig_sec_pval.update_layout(title="Statistical Significance by Security Type", xaxis_title="Security Type", 
-                          yaxis_title="P-Value", template='plotly_white', height=350)
-
-# Chart 4C: Customer Activity Heatmap
-sec_activity = agg_data.groupby(['Security_Type', 'Period'])['Customer_Name'].nunique().reset_index()
-sec_activity_pivot = sec_activity.pivot(index='Security_Type', columns='Period', values='Customer_Name').fillna(0)
-fig_sec_heatmap = go.Figure(data=go.Heatmap(z=sec_activity_pivot.values, x=sec_activity_pivot.columns, 
-                                           y=sec_activity_pivot.index, colorscale='Blues', 
-                                           text=sec_activity_pivot.values, texttemplate="%{text}", textfont={"size":10}))
-fig_sec_heatmap.update_layout(title="Active Customers by Security Type & Period", height=350, template='plotly_white')
-
-# Chart 4D: Volume vs Impact Scatter
-fig_sec_scatter = go.Figure()
-fig_sec_scatter.add_trace(go.Scatter(x=sec_results_df['Active_Customers'], y=sec_results_df['DiD_Effect_Mean'], 
-                                    mode='markers+text', text=sec_results_df['Security_Type'],
-                                    textposition="top center", marker=dict(size=10, color=sec_results_df['P_Value'], 
-                                    colorscale='RdYlBu_r', showscale=True, colorbar=dict(title="P-Value"))))
-fig_sec_scatter.add_hline(y=0, line_dash="dot", line_color="gray")
-fig_sec_scatter.update_layout(title="Impact vs Customer Activity", xaxis_title="Active Customers", 
-                             yaxis_title="DiD Effect ($)", template='plotly_white', height=350)
-
-fig_sec_impact.show()
-fig_sec_pval.show()
-fig_sec_heatmap.show()
-fig_sec_scatter.show()
-
-# === SLIDE 5: INDUSTRY ANALYSIS - 4 CHARTS ===
-print("Creating Industry Analysis Dashboard...")
-
-# Chart 5A: Industry Impact Bar Chart
-sig_industry = ind_results_df[ind_results_df['P_Value'] < 0.05].copy()
-sig_industry = sig_industry.sort_values('DiD_Effect_Mean')
-colors_ind = ['red' if x < 0 else 'green' for x in sig_industry['DiD_Effect_Mean']]
-
-fig_ind_impact = go.Figure(data=[go.Bar(x=sig_industry['DiD_Effect_Mean'], y=sig_industry['Industry'], 
-                                       orientation='h', marker_color=colors_ind,
-                                       text=[f"${x:,.0f}" for x in sig_industry['DiD_Effect_Mean']], textposition='outside')])
-fig_ind_impact.add_vline(x=0, line_dash="dot", line_color="gray")
-fig_ind_impact.update_layout(title="Significant Industry Impacts", xaxis_title="Net Buy Change ($)", 
-                            template='plotly_white', height=350)
-
-# Chart 5B: Industry Customer Distribution
-ind_customers = df.groupby('Customer_Industry')['Customer_Name'].nunique().reset_index()
-ind_customers = ind_customers.sort_values('Customer_Name', ascending=False)
-fig_ind_customers = go.Figure(data=[go.Bar(x=ind_customers['Customer_Industry'], y=ind_customers['Customer_Name'],
-                                          marker_color='steelblue')])
-fig_ind_customers.update_layout(title="Customer Base by Industry", xaxis_title="Industry", 
-                               yaxis_title="Number of Customers", template='plotly_white', height=350,
-                               xaxis_tickangle=-45)
-
-# Chart 5C: Industry Trading Volume Comparison
-ind_volume = df_filtered.groupby(['Customer_Industry', 'Period'])['Amount'].sum().reset_index()
-ind_volume_pivot = ind_volume.pivot(index='Customer_Industry', columns='Period', values='Amount').fillna(0)
-fig_ind_volume = go.Figure()
-for period in ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']:
-    fig_ind_volume.add_trace(go.Bar(name=period.replace('_', ' ').title(), x=ind_volume_pivot.index, 
-                                   y=ind_volume_pivot[period]))
-fig_ind_volume.update_layout(title="Trading Volume by Industry & Period", xaxis_title="Industry", 
-                            yaxis_title="Total Net Buy ($)", barmode='group', template='plotly_white', 
-                            height=350, xaxis_tickangle=-45)
-
-# Chart 5D: Risk Assessment Matrix
-risk_data = ind_results_df.copy()
-risk_data['Risk_Level'] = pd.cut(risk_data['P_Value'], bins=[0, 0.01, 0.05, 1], 
-                                labels=['High Impact', 'Moderate Impact', 'No Impact'])
-risk_data['Effect_Direction'] = ['Negative' if x < 0 else 'Positive' if x > 0 else 'Neutral' 
-                                for x in risk_data['DiD_Effect_Mean']]
-
-fig_ind_risk = go.Figure(data=[go.Table(
-    header=dict(values=['Industry', 'Impact ($)', 'Risk Level', 'Direction', 'Active Customers'],
-                fill_color='lightblue', align='center', font_size=11),
-    cells=dict(values=[
-        risk_data['Industry'],
-        [f"${x:,.0f}" for x in risk_data['DiD_Effect_Mean']],
-        risk_data['Risk_Level'],
-        risk_data['Effect_Direction'],
-        risk_data['Active_Customers']
-    ], fill_color='white', align='center', font_size=10))
-])
-fig_ind_risk.update_layout(title="Industry Risk Assessment Matrix", height=400, template='plotly_white')
-
-fig_ind_impact.show()
-fig_ind_customers.show()
-fig_ind_volume.show()
-fig_ind_risk.show()
-
-# === BONUS: EXECUTIVE SUMMARY DASHBOARD ===
-print("Creating Executive Summary Dashboard...")
-
-# Create a comprehensive summary
-summary_metrics = {
-    'Total Customers Analyzed': len(customer_period_pivot),
-    'Total Trades': len(df),
-    'Significant Security Types': len(sig_security),
-    'Significant Industries': len(sig_industry),
-    'Overall P-Value': 0.5766,
-    'Analysis Period': '30 days pre/post tariff'
-}
-
-fig_summary = make_subplots(
-    rows=2, cols=2,
-    subplot_titles=('Key Metrics', 'Security Impact', 'Industry Impact', 'Customer Activity'),
-    specs=[[{"type": "table"}, {"type": "bar"}],
-           [{"type": "bar"}, {"type": "scatter"}]]
-)
-
-# Add summary table
-fig_summary.add_trace(go.Table(
-    header=dict(values=['Metric', 'Value'], fill_color='lightblue'),
-    cells=dict(values=[list(summary_metrics.keys()), list(summary_metrics.values())], 
-               fill_color='white')
-), row=1, col=1)
-
-# Add security summary
-fig_summary.add_trace(go.Bar(x=sig_security['Security_Type'], y=sig_security['DiD_Effect_Mean'], 
-                            marker_color=colors_sec, name="Security Impact"), row=1, col=2)
-
-# Add industry summary  
-fig_summary.add_trace(go.Bar(x=sig_industry['Industry'], y=sig_industry['DiD_Effect_Mean'],
-                            marker_color=colors_ind, name="Industry Impact"), row=2, col=1)
-
-# Add customer changes scatter
-fig_summary.add_trace(go.Scatter(x=customer_period_pivot['Change_2024'], y=customer_period_pivot['Change_2025'],
-                                mode='markers', opacity=0.6, name="Customer Changes"), row=2, col=2)
-
-fig_summary.update_layout(height=600, showlegend=False, title_text="Executive Summary Dashboard")
-fig_summary.show()
-
-print("\n--- All Visualizations Created Successfully! ---")
-print("You now have 12+ charts across 4 comprehensive dashboards:")
-print("- Overall Analysis: 4 charts (time series, distributions, stats)")
-print("- Security Types: 4 charts (impact, significance, activity, correlation)")  
-print("- Industries: 4 charts (impact, customer base, volume, risk matrix)")
-print("- Executive Summary: 1 comprehensive dashboard")
-print("\nThis will definitely impress your manager! 🚀")
+print("\nChart files saved:")
+print("- security_type_analysis.png (for Security Type slide)")
+print("- industry_analysis.png (for Industry slide)")
+print("\nSignificance markers: *** p<0.001, ** p<0.01, * p<0.05")
