@@ -1,3 +1,203 @@
+# Industry Impact Statistical Significance Test with Seasonality Control
+print("\n6. INDUSTRY IMPACT STATISTICAL SIGNIFICANCE TEST")
+print("-" * 60)
+
+# 1. Chi-square test for industry distribution change
+def test_industry_significance(df, event_date):
+    """Test if industry distribution changed significantly"""
+    pre_data = df[df['Date'] < event_date]
+    post_data = df[df['Date'] >= event_date]
+    
+    # Create contingency table for chi-square test
+    pre_industry_counts = pre_data.groupby('Customer_Industry')['Amount'].count()
+    post_industry_counts = post_data.groupby('Customer_Industry')['Amount'].count()
+    
+    # Align industries
+    all_industries = list(set(pre_industry_counts.index) | set(post_industry_counts.index))
+    pre_counts = [pre_industry_counts.get(ind, 0) for ind in all_industries]
+    post_counts = [post_industry_counts.get(ind, 0) for ind in all_industries]
+    
+    # Chi-square test
+    chi2, p_value = stats.chisquare(post_counts, pre_counts)
+    
+    return chi2, p_value, all_industries
+
+# 2. Industry-specific tests with seasonality control
+def test_industry_with_seasonality(df, industry, event_2024, event_2025, window=30):
+    """Test specific industry with 2024 vs 2025 comparison"""
+    
+    # Get 2024 data
+    pre_2024 = df[(df['Date'] >= event_2024 - timedelta(days=window)) & 
+                  (df['Date'] < event_2024) & 
+                  (df['Customer_Industry'] == industry)]
+    post_2024 = df[(df['Date'] >= event_2024) & 
+                   (df['Date'] <= event_2024 + timedelta(days=window)) & 
+                   (df['Customer_Industry'] == industry)]
+    
+    # Get 2025 data
+    pre_2025 = df[(df['Date'] >= event_2025 - timedelta(days=window)) & 
+                  (df['Date'] < event_2025) & 
+                  (df['Customer_Industry'] == industry)]
+    post_2025 = df[(df['Date'] >= event_2025) & 
+                   (df['Date'] <= event_2025 + timedelta(days=window)) & 
+                   (df['Customer_Industry'] == industry)]
+    
+    # Calculate changes
+    if len(pre_2024) > 0 and len(post_2024) > 0:
+        change_2024 = (post_2024['Amount'].sum() - pre_2024['Amount'].sum()) / abs(pre_2024['Amount'].sum()) * 100
+    else:
+        change_2024 = 0
+        
+    if len(pre_2025) > 0 and len(post_2025) > 0:
+        change_2025 = (post_2025['Amount'].sum() - pre_2025['Amount'].sum()) / abs(pre_2025['Amount'].sum()) * 100
+    else:
+        change_2025 = 0
+    
+    # Difference-in-differences
+    diff_in_diff = change_2025 - change_2024
+    
+    # Bootstrap test for significance
+    if len(pre_2024) > 10 and len(post_2024) > 10 and len(pre_2025) > 10 and len(post_2025) > 10:
+        # Combine all data
+        all_2024 = pd.concat([pre_2024, post_2024])
+        all_2025 = pd.concat([pre_2025, post_2025])
+        
+        # Bootstrap
+        n_bootstrap = 1000
+        bootstrap_diffs = []
+        
+        for _ in range(n_bootstrap):
+            # Resample
+            sample_2024 = all_2024.sample(n=len(all_2024), replace=True)
+            sample_2025 = all_2025.sample(n=len(all_2025), replace=True)
+            
+            # Split into pre/post
+            pre_sample_2024 = sample_2024.iloc[:len(pre_2024)]
+            post_sample_2024 = sample_2024.iloc[len(pre_2024):]
+            pre_sample_2025 = sample_2025.iloc[:len(pre_2025)]
+            post_sample_2025 = sample_2025.iloc[len(pre_2025):]
+            
+            # Calculate bootstrap diff-in-diff
+            if len(pre_sample_2024) > 0 and len(pre_sample_2025) > 0:
+                boot_change_2024 = (post_sample_2024['Amount'].sum() - pre_sample_2024['Amount'].sum()) / abs(pre_sample_2024['Amount'].sum()) * 100
+                boot_change_2025 = (post_sample_2025['Amount'].sum() - pre_sample_2025['Amount'].sum()) / abs(pre_sample_2025['Amount'].sum()) * 100
+                bootstrap_diffs.append(boot_change_2025 - boot_change_2024)
+        
+        # Calculate p-value
+        bootstrap_diffs = np.array(bootstrap_diffs)
+        p_value = np.sum(np.abs(bootstrap_diffs) >= np.abs(diff_in_diff)) / n_bootstrap
+        
+        return diff_in_diff, p_value, True
+    else:
+        return diff_in_diff, None, False
+
+# Test overall industry distribution
+chi2, p_value, industries = test_industry_significance(df, apr_event)
+print(f"\nOverall Industry Distribution Change:")
+print(f"Chi-square statistic: {chi2:.3f}")
+print(f"P-value: {p_value:.4f}")
+print(f"Significant: {'YES' if p_value < 0.05 else 'NO'}")
+
+# Test each significant industry with seasonality control
+event_2024 = pd.Timestamp('2024-04-02')
+event_2025 = pd.Timestamp('2025-04-02')
+
+print("\n" + "="*60)
+print("INDUSTRY-SPECIFIC TESTS WITH SEASONALITY CONTROL")
+print("="*60)
+
+# Get industries with significant changes
+significant_results = []
+
+for industry in significant_industries.index[:20]:  # Test top 20
+    diff_in_diff, p_val, tested = test_industry_with_seasonality(
+        df, industry, event_2024, event_2025
+    )
+    
+    if tested and p_val is not None:
+        significant_results.append({
+            'Industry': industry,
+            'Diff_in_Diff': diff_in_diff,
+            'P_value': p_val,
+            'Significant': p_val < 0.05,
+            'Customer_Count': significant_industries.loc[industry, 'Customer_Count']
+        })
+
+# Convert to DataFrame and sort
+results_df = pd.DataFrame(significant_results)
+results_df = results_df.sort_values('P_value')
+
+print("\nIndustries with Statistically Significant Changes (p < 0.05):")
+print("-" * 60)
+sig_industries = results_df[results_df['Significant']]
+if len(sig_industries) > 0:
+    for _, row in sig_industries.iterrows():
+        print(f"{row['Industry']}:")
+        print(f"  Diff-in-Diff: {row['Diff_in_Diff']:.1f}%")
+        print(f"  P-value: {row['P_value']:.4f}")
+        print(f"  Customers: {row['Customer_Count']}")
+        print()
+else:
+    print("NO INDUSTRIES SHOWED STATISTICALLY SIGNIFICANT CHANGES AFTER CONTROLLING FOR SEASONALITY")
+
+print("\nTop 10 Industries by P-value:")
+print(results_df[['Industry', 'Diff_in_Diff', 'P_value', 'Significant']].head(10))
+
+# Create visualization
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+# Plot 1: P-values by industry
+industries_to_plot = results_df.head(15)
+y_pos = np.arange(len(industries_to_plot))
+
+colors = ['red' if p < 0.05 else 'gray' for p in industries_to_plot['P_value']]
+bars = ax1.barh(y_pos, industries_to_plot['P_value'], color=colors, alpha=0.7)
+
+ax1.axvline(x=0.05, color='red', linestyle='--', label='Significance threshold')
+ax1.set_yticks(y_pos)
+ax1.set_yticklabels(industries_to_plot['Industry'])
+ax1.set_xlabel('P-value')
+ax1.set_title('Statistical Significance of Industry Changes (with Seasonality Control)')
+ax1.legend()
+ax1.set_xlim(0, 1)
+
+# Plot 2: Effect sizes for significant industries
+if len(sig_industries) > 0:
+    sig_y_pos = np.arange(len(sig_industries))
+    colors = ['green' if d > 0 else 'red' for d in sig_industries['Diff_in_Diff']]
+    
+    ax2.barh(sig_y_pos, sig_industries['Diff_in_Diff'], color=colors, alpha=0.7)
+    ax2.set_yticks(sig_y_pos)
+    ax2.set_yticklabels(sig_industries['Industry'])
+    ax2.set_xlabel('Difference-in-Differences (%)')
+    ax2.set_title('Effect Size for Statistically Significant Industries')
+    ax2.axvline(x=0, color='black', linestyle='-', alpha=0.3)
+else:
+    ax2.text(0.5, 0.5, 'No Statistically Significant Industries Found', 
+             ha='center', va='center', transform=ax2.transAxes, fontsize=16)
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+
+plt.tight_layout()
+plt.savefig('industry_statistical_significance.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# Summary
+print("\n" + "="*60)
+print("SUMMARY OF INDUSTRY IMPACT SIGNIFICANCE")
+print("="*60)
+print(f"Total industries tested: {len(results_df)}")
+print(f"Statistically significant (p<0.05): {len(sig_industries)}")
+print(f"Percentage significant: {len(sig_industries)/len(results_df)*100:.1f}%")
+
+if len(sig_industries) > 0:
+    print(f"\nMost significant industry: {sig_industries.iloc[0]['Industry']}")
+    print(f"  Effect size: {sig_industries.iloc[0]['Diff_in_Diff']:.1f}%")
+    print(f"  P-value: {sig_industries.iloc[0]['P_value']:.4f}")
+
+
+=============ㅌㅌㅌㅌ===========
+
 # 5. Industry Impact Analysis with Enhanced Visualizations
 print("\n5. INDUSTRY IMPACT ANALYSIS")
 print("-" * 40)
