@@ -227,21 +227,44 @@ for _, row in sec_results_df.iterrows():
     else:
         print(f"  - {row['Security_Type']}: No significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
 
+
+
+
 # --- 6. OPTIMIZED Industry Analysis ---
 print("\n--- 6. Optimized Industry Analysis ---")
 start_time = time.time()
 
-# Get customer-industry mapping
-customer_industry_map = df[['Customer_Name', 'Customer_Industry']].drop_duplicates().set_index('Customer_Name')['Customer_Industry']
+# Get customer-industry mapping - handle potential duplicates
+customer_industry_df = df[['Customer_Name', 'Customer_Industry']].drop_duplicates()
+
+# Check for customers with multiple industries (data quality issue)
+customer_counts = customer_industry_df['Customer_Name'].value_counts()
+if (customer_counts > 1).any():
+    print(f"Warning: {(customer_counts > 1).sum()} customers have multiple industries. Using first occurrence.")
+    # Keep only the first occurrence for each customer
+    customer_industry_df = customer_industry_df.drop_duplicates(subset=['Customer_Name'], keep='first')
+
+customer_industry_map = customer_industry_df.set_index('Customer_Name')['Customer_Industry']
 
 # Add industry info to customer_period_pivot
 customer_period_with_industry = customer_period_pivot.copy()
-customer_period_with_industry['Industry'] = customer_period_with_industry.index.map(customer_industry_map)
+customer_period_with_industry = customer_period_with_industry.reset_index()  # Reset index to make Customer_Name a column
+customer_period_with_industry['Industry'] = customer_period_with_industry['Customer_Name'].map(customer_industry_map)
 
 industry_results = []
 
 for industry in industries:
     industry_data = customer_period_with_industry[customer_period_with_industry['Industry'] == industry]
+    
+    if len(industry_data) == 0:
+        industry_results.append({
+            'Industry': industry,
+            'DiD_Effect_Mean': 0,
+            'T_Statistic': np.nan,
+            'P_Value': np.nan,
+            'Active_Customers': 0
+        })
+        continue
     
     # Filter active customers
     active_cols = ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']
