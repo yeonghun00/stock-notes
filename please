@@ -309,196 +309,177 @@ print("\n--- Analysis Complete ---")
 #######
 
 
+# --- 7. VISUALIZATIONS FOR PRESENTATION ---
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
-# --- 7. VISUALIZATIONS AND BUSINESS INSIGHTS ---
-print("\n--- 7. Visualizations and Business Insights ---")
-import matplotlib.pyplot as plt
-import seaborn as sns
+print("\n--- Creating Presentation Visualizations ---")
 
-# Set style for professional plots
-plt.style.use('default')
-sns.set_palette("husl")
-fig_count = 1
+# === SLIDE 3: OVERALL ANALYSIS VISUALIZATION ===
+print("Creating Overall Analysis Chart...")
 
-# Create a figure with multiple subplots
-fig = plt.figure(figsize=(20, 16))
+# Calculate daily aggregates for time series
+daily_data = df_filtered.groupby(['Date', 'Period'])['Amount'].sum().reset_index()
+daily_pivot = daily_data.pivot(index='Date', columns='Period', values='Amount').fillna(0)
 
-# 1. Overall DiD Visualization
-ax1 = plt.subplot(2, 3, 1)
-overall_changes = [customer_period_pivot['Change_2024'].mean(), customer_period_pivot['Change_2025'].mean()]
-years = ['2024 (Control)', '2025 (Tariff Year)']
-colors = ['lightblue', 'coral']
-bars = plt.bar(years, overall_changes, color=colors, alpha=0.7, edgecolor='black')
-plt.title('Overall Net Buy Change\n(Pre to Post Period Comparison)', fontsize=12, fontweight='bold')
-plt.ylabel('Mean Net Buy Change ($)')
-plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-# Add value labels on bars
-for bar, value in zip(bars, overall_changes):
-    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + (max(overall_changes)*0.02), 
-             f'${value:,.0f}', ha='center', va='bottom', fontweight='bold')
+# Create the overall trends chart
+fig_overall = go.Figure()
 
-# 2. Significant Security Types
-ax2 = plt.subplot(2, 3, 2)
-sig_sec_results = sec_results_df[sec_results_df['P_Value'] < 0.05].copy()
-if not sig_sec_results.empty:
-    colors_sec = ['green' if x > 0 else 'red' for x in sig_sec_results['DiD_Effect_Mean']]
-    bars = plt.bar(range(len(sig_sec_results)), sig_sec_results['DiD_Effect_Mean'], 
-                   color=colors_sec, alpha=0.7, edgecolor='black')
-    plt.title('Significant Security Types\n(DiD Effects)', fontsize=12, fontweight='bold')
-    plt.ylabel('DiD Effect ($)')
-    plt.xticks(range(len(sig_sec_results)), sig_sec_results['Security_Type'], rotation=45, ha='right')
-    plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-    # Add value labels
-    for i, (bar, value) in enumerate(zip(bars, sig_sec_results['DiD_Effect_Mean'])):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + (max(abs(sig_sec_results['DiD_Effect_Mean']))*0.02), 
-                 f'${value:,.0f}', ha='center', va='bottom' if value > 0 else 'top', fontweight='bold')
+# Add 2024 periods
+fig_overall.add_trace(go.Scatter(
+    x=daily_pivot.index[daily_pivot['pre_2024'].notna()],
+    y=daily_pivot['pre_2024'].dropna(),
+    mode='lines+markers',
+    name='2024 Pre-Period',
+    line=dict(color='lightblue', width=2),
+    marker=dict(size=4)
+))
 
-# 3. Significant Industries
-ax3 = plt.subplot(2, 3, 3)
-sig_ind_results = ind_results_df[ind_results_df['P_Value'] < 0.05].copy()
-if not sig_ind_results.empty:
-    colors_ind = ['green' if x > 0 else 'red' for x in sig_ind_results['DiD_Effect_Mean']]
-    bars = plt.bar(range(len(sig_ind_results)), sig_ind_results['DiD_Effect_Mean'], 
-                   color=colors_ind, alpha=0.7, edgecolor='black')
-    plt.title('Significant Industries\n(DiD Effects)', fontsize=12, fontweight='bold')
-    plt.ylabel('DiD Effect ($)')
-    plt.xticks(range(len(sig_ind_results)), [name[:20] + '...' if len(name) > 20 else name 
-                                             for name in sig_ind_results['Industry']], rotation=45, ha='right')
-    plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-    # Add value labels
-    for i, (bar, value) in enumerate(zip(bars, sig_ind_results['DiD_Effect_Mean'])):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + (max(abs(sig_ind_results['DiD_Effect_Mean']))*0.02), 
-                 f'${value:,.0f}', ha='center', va='bottom' if value > 0 else 'top', fontweight='bold')
+fig_overall.add_trace(go.Scatter(
+    x=daily_pivot.index[daily_pivot['post_2024'].notna()],
+    y=daily_pivot['post_2024'].dropna(),
+    mode='lines+markers',
+    name='2024 Post-Period',
+    line=dict(color='blue', width=2),
+    marker=dict(size=4)
+))
 
-# 4. Distribution of Customer Changes
-ax4 = plt.subplot(2, 3, 4)
-plt.hist(customer_period_pivot['Change_2024'], bins=30, alpha=0.5, label='2024 Changes', color='lightblue', density=True)
-plt.hist(customer_period_pivot['Change_2025'], bins=30, alpha=0.5, label='2025 Changes', color='coral', density=True)
-plt.title('Distribution of Customer\nNet Buy Changes', fontsize=12, fontweight='bold')
-plt.xlabel('Net Buy Change ($)')
-plt.ylabel('Density')
-plt.legend()
-plt.axvline(x=customer_period_pivot['Change_2024'].mean(), color='blue', linestyle='--', alpha=0.8, label='2024 Mean')
-plt.axvline(x=customer_period_pivot['Change_2025'].mean(), color='red', linestyle='--', alpha=0.8, label='2025 Mean')
+# Add 2025 periods
+fig_overall.add_trace(go.Scatter(
+    x=daily_pivot.index[daily_pivot['pre_2025'].notna()],
+    y=daily_pivot['pre_2025'].dropna(),
+    mode='lines+markers',
+    name='2025 Pre-Tariff',
+    line=dict(color='lightcoral', width=2),
+    marker=dict(size=4)
+))
 
-# 5. Security Type P-Values (Significance Levels)
-ax5 = plt.subplot(2, 3, 5)
-sec_pvalues = sec_results_df.dropna(subset=['P_Value'])
-colors_p = ['red' if p < 0.05 else 'gray' for p in sec_pvalues['P_Value']]
-bars = plt.bar(range(len(sec_pvalues)), sec_pvalues['P_Value'], color=colors_p, alpha=0.7, edgecolor='black')
-plt.title('Security Types Statistical Significance\n(P-Values)', fontsize=12, fontweight='bold')
-plt.ylabel('P-Value')
-plt.xticks(range(len(sec_pvalues)), sec_pvalues['Security_Type'], rotation=45, ha='right')
-plt.axhline(y=0.05, color='red', linestyle='--', alpha=0.8, label='α = 0.05')
-plt.legend()
-plt.ylim(0, max(sec_pvalues['P_Value']) * 1.1)
+fig_overall.add_trace(go.Scatter(
+    x=daily_pivot.index[daily_pivot['post_2025'].notna()],
+    y=daily_pivot['post_2025'].dropna(),
+    mode='lines+markers',
+    name='2025 Post-Tariff',
+    line=dict(color='red', width=3),
+    marker=dict(size=6)
+))
 
-# 6. Industry P-Values (Significance Levels)
-ax6 = plt.subplot(2, 3, 6)
-ind_pvalues = ind_results_df.dropna(subset=['P_Value'])
-colors_p_ind = ['red' if p < 0.05 else 'gray' for p in ind_pvalues['P_Value']]
-bars = plt.bar(range(len(ind_pvalues)), ind_pvalues['P_Value'], color=colors_p_ind, alpha=0.7, edgecolor='black')
-plt.title('Industries Statistical Significance\n(P-Values)', fontsize=12, fontweight='bold')
-plt.ylabel('P-Value')
-plt.xticks(range(len(ind_pvalues)), [name[:15] + '...' if len(name) > 15 else name 
-                                     for name in ind_pvalues['Industry']], rotation=45, ha='right')
-plt.axhline(y=0.05, color='red', linestyle='--', alpha=0.8, label='α = 0.05')
-plt.legend()
-plt.ylim(0, max(ind_pvalues['P_Value']) * 1.1)
+# Add vertical line for tariff date
+fig_overall.add_vline(x=tariff_date, line_dash="dash", line_color="black", 
+                     annotation_text="Tariff Implemented", annotation_position="top")
 
-plt.tight_layout()
-plt.show()
+fig_overall.update_layout(
+    title="Overall Customer Net Buy: No Significant Change<br><sub>P-value: 0.58 (Not Statistically Significant)</sub>",
+    xaxis_title="Date",
+    yaxis_title="Daily Net Buy ($)",
+    hovermode='x unified',
+    template='plotly_white',
+    width=900,
+    height=500
+)
 
-print("\n" + "="*80)
-print("STATISTICAL INTERPRETATION & BUSINESS INSIGHTS")
-print("="*80)
+fig_overall.show()
 
-print("\n1. OVERALL NET BUY ANALYSIS:")
-print("   Statistical View:")
-print(f"   • Mean DiD Effect: ${customer_period_pivot['Change_2025'].mean() - customer_period_pivot['Change_2024'].mean():,.2f}")
-print(f"   • T-statistic: 0.558 (small effect size)")
-print(f"   • P-value: 0.5766 > 0.05 (NOT statistically significant)")
-print("   • Interpretation: No evidence that tariffs caused systematic change in overall customer investment behavior")
-print("   • Effect size is small relative to natural variation in customer behavior")
-print("\n   Business Insight:")
-print("   ✓ Overall portfolio impact appears minimal - tariffs did not trigger mass market movements")
-print("   ✓ Customer base remains stable in aggregate investment patterns")
-print("   ✓ RMs can focus on specific segments rather than broad market concerns")
+# === SLIDE 4: SECURITY TYPE ANALYSIS VISUALIZATION ===
+print("Creating Security Type Analysis Chart...")
 
-print("\n2. SECURITY TYPE ANALYSIS (Statistically Significant Results):")
+# Filter significant results only
+sig_security = sec_results_df[sec_results_df['P_Value'] < 0.05].copy()
+sig_security = sig_security.sort_values('DiD_Effect_Mean')
 
-# CDEP Analysis
-print("\n   📊 CERTIFICATE OF DEPOSIT (CDEP):")
-print("   Statistical View:")
-print("   • DiD Effect: +$3,293,969 (LARGE positive effect)")
-print("   • P-value: 0.0235 < 0.05 (statistically significant)")
-print("   • Effect Size: Large and economically meaningful")
-print("   Business Insight:")
-print("   ✓ FLIGHT TO SAFETY: Customers significantly increased CD investments post-tariff")
-print("   ✓ Risk-averse behavior - seeking guaranteed returns amid uncertainty")
-print("   ✓ RM Action: Expand CD product offerings, competitive rates")
+# Create color mapping
+colors = ['red' if x < 0 else 'green' for x in sig_security['DiD_Effect_Mean']]
 
-# ELNO Analysis  
-print("\n   📊 FOREIGN SECURITIES (ELNO):")
-print("   Statistical View:")
-print("   • DiD Effect: -$12,793,790 (VERY LARGE negative effect)")
-print("   • P-value: 0.0018 < 0.05 (highly statistically significant)")
-print("   • Effect Size: Extremely large - strongest signal in data")
-print("   Business Insight:")
-print("   ✓ TRADE WAR IMPACT: Massive reduction in foreign investment post-tariff")
-print("   ✓ Customers avoiding international exposure due to tariff uncertainties")
-print("   ✓ RM Action: Counsel clients on diversification, consider hedged international products")
+fig_security = go.Figure(data=[
+    go.Bar(
+        x=sig_security['DiD_Effect_Mean'],
+        y=sig_security['Security_Type'],
+        orientation='h',
+        marker_color=colors,
+        text=[f"${x:,.0f}" for x in sig_security['DiD_Effect_Mean']],
+        textposition='outside',
+        hovertemplate='<b>%{y}</b><br>Impact: $%{x:,.0f}<br>P-value: %{customdata:.4f}<extra></extra>',
+        customdata=sig_security['P_Value']
+    )
+])
 
-# BOND Analysis
-print("\n   📊 BONDS:")
-print("   Statistical View:")
-print("   • DiD Effect: -$2,521,739 (LARGE negative effect)")
-print("   • P-value: 0.0012 < 0.05 (highly statistically significant)")
-print("   • Effect Size: Large and concerning for fixed income")
-print("   Business Insight:")
-print("   ✓ UNEXPECTED RESULT: Bond divestment suggests inflation fears or rate expectations")
-print("   ✓ Customers may anticipate Fed policy changes due to tariff impacts")
-print("   ✓ RM Action: Review bond portfolio duration, consider inflation-protected securities")
+fig_security.update_layout(
+    title="Security Type Impact: Flight to Safety Pattern<br><sub>Certificate of Deposits ↑ | Foreign Stocks ↓ | Bonds ↓</sub>",
+    xaxis_title="Net Buy Change ($) - Tariff Impact",
+    yaxis_title="Security Type",
+    template='plotly_white',
+    width=900,
+    height=400,
+    xaxis=dict(tickformat='$,.0f')
+)
 
-print("\n3. INDUSTRY ANALYSIS (Statistically Significant Results):")
+# Add zero line
+fig_security.add_vline(x=0, line_dash="dot", line_color="gray")
 
-# Industry 1
-print("\n   🏭 RENTING OF LAND TRANSPORT:")
-print("   Statistical View:")
-print("   • DiD Effect: -$159,207 (moderate negative effect)")
-print("   • P-value: 0.0442 < 0.05 (statistically significant)")
-print("   Business Insight:")
-print("   ✓ SUPPLY CHAIN CONCERNS: Transport industry reducing investments")
-print("   ✓ Anticipating increased logistics costs from tariffs")
+fig_security.show()
 
-# Industry 2
-print("\n   🏭 TRADING OF MEDICAL & PRECISION INSTRUMENTS:")
-print("   Statistical View:")
-print("   • DiD Effect: -$3,656,606 (VERY LARGE negative effect)")
-print("   • P-value: 0.0467 < 0.05 (statistically significant)")
-print("   Business Insight:")
-print("   ✓ IMPORT-DEPENDENT SECTOR: Medical/precision instruments heavily affected")
-print("   ✓ Companies anticipating supply chain disruptions")
-print("   ✓ RM Action: High-priority client conversations needed")
+# === SLIDE 5: INDUSTRY ANALYSIS VISUALIZATION ===
+print("Creating Industry Analysis Chart...")
 
-# Industry 3
-print("\n   🏭 TRADING OF TOOLS, HARDWARE, FITTINGS & FIXTURES:")
-print("   Statistical View:")
-print("   • DiD Effect: +$2,373,080 (LARGE positive effect)")
-print("   • P-value: 0.0458 < 0.05 (statistically significant)")
-print("   Business Insight:")
-print("   ✓ DOMESTIC BENEFICIARY: Tools/hardware industry increasing investments")
-print("   ✓ Anticipating benefits from reduced foreign competition")
-print("   ✓ RM Action: Capitalize on growth opportunities in this sector")
+# Filter significant results only
+sig_industry = ind_results_df[ind_results_df['P_Value'] < 0.05].copy()
+sig_industry = sig_industry.sort_values('DiD_Effect_Mean')
 
-print("\n" + "="*80)
-print("KEY TAKEAWAYS FOR RELATIONSHIP MANAGERS:")
-print("="*80)
-print("1. 🎯 SEGMENT-SPECIFIC APPROACH: Overall market stable, but specific segments heavily impacted")
-print("2. 🌍 INTERNATIONAL EXPOSURE: Massive flight from foreign securities - address diversification")
-print("3. 🛡️  SAFETY SEEKING: Increased CD demand indicates client risk aversion")
-print("4. 🏭 INDUSTRY POLARIZATION: Import-dependent industries suffering, domestic suppliers benefiting")
-print("5. 📈 OPPORTUNITY: Position bank products to serve changing risk preferences")
-print("\nStatistical Confidence: All reported effects are statistically significant (p < 0.05)")
-print("Economic Significance: Effect sizes are large and economically meaningful")
-print("Recommendation: Implement targeted strategies for identified segments immediately")
+# Create color mapping
+colors_ind = ['red' if x < 0 else 'green' for x in sig_industry['DiD_Effect_Mean']]
+
+fig_industry = go.Figure(data=[
+    go.Bar(
+        x=sig_industry['DiD_Effect_Mean'],
+        y=sig_industry['Industry'],
+        orientation='h',
+        marker_color=colors_ind,
+        text=[f"${x:,.0f}" for x in sig_industry['DiD_Effect_Mean']],
+        textposition='outside',
+        hovertemplate='<b>%{y}</b><br>Impact: $%{x:,.0f}<br>P-value: %{customdata:.4f}<extra></extra>',
+        customdata=sig_industry['P_Value']
+    )
+])
+
+fig_industry.update_layout(
+    title="Industry Impact: Targeted Effects<br><sub>Transport & Medical Equipment Hit | Tools & Hardware Benefit</sub>",
+    xaxis_title="Net Buy Change ($) - Tariff Impact",
+    yaxis_title="Industry",
+    template='plotly_white',
+    width=900,
+    height=400,
+    xaxis=dict(tickformat='$,.0f')
+)
+
+# Add zero line
+fig_industry.add_vline(x=0, line_dash="dot", line_color="gray")
+
+fig_industry.show()
+
+# === SUMMARY STATISTICS TABLE ===
+print("Creating Summary Statistics...")
+
+summary_stats = pd.DataFrame({
+    'Analysis': ['Overall Net Buy', 'Security Types (Significant)', 'Industries (Significant)'],
+    'P-Value': [0.5766, f"{sig_security['P_Value'].mean():.4f} avg", f"{sig_industry['P_Value'].mean():.4f} avg"],
+    'Key Finding': [
+        'No significant change',
+        f'{len(sig_security)} types significantly affected',
+        f'{len(sig_industry)} industries significantly affected'
+    ],
+    'Business Impact': [
+        'Aggregate stability',
+        'Flight to safety pattern',
+        'Targeted sector effects'
+    ]
+})
+
+print("\nSummary Table for Presentation:")
+print(summary_stats.to_string(index=False))
+
+print("\n--- Visualization Creation Complete ---")
+print("Charts are ready for your PowerPoint presentation!")
+print("\nKey Messages:")
+print("1. Overall: Statistically stable (p=0.58)")
+print(f"2. Security Types: {len(sig_security)} significantly affected - flight to safety")
+print(f"3. Industries: {len(sig_industry)} targeted impacts - actionable for RMs")
