@@ -583,7 +583,7 @@ print("\n--- Analysis Complete ---")
 
 
 
-# --- 7. VISUALIZATION FOR PPT (PLOTLY) ---
+# --- 7. VISUALIZATION FOR PPT (PLOTLY - OPTIMIZED) ---
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
@@ -616,7 +616,9 @@ if len(sec_significant) > 0:
     
     # Select top 7 by absolute change magnitude
     sec_significant['Abs_Change_Magnitude'] = sec_significant['Abs_Change'].abs()
-    sec_plot_data = sec_significant.nlargest(7, 'Abs_Change_Magnitude')
+    sec_plot_data = sec_significant.nlargest(min(7, len(sec_significant)), 'Abs_Change_Magnitude').reset_index(drop=True)
+    
+    print(f"Creating charts for {len(sec_plot_data)} security types...")
     
     # Create subplots
     fig = make_subplots(
@@ -625,16 +627,22 @@ if len(sec_significant) > 0:
         specs=[[{"secondary_y": False}, {"secondary_y": False}]]
     )
     
+    # Prepare data for plotting (vectorized)
+    security_types = sec_plot_data['Security_Type'].tolist()
+    pre_values = (sec_plot_data['Pre_2025_Avg']/1000).tolist()
+    post_values = (sec_plot_data['Post_2025_Avg']/1000).tolist()
+    did_values = (sec_plot_data['DiD_Effect_Mean']/1000).tolist()
+    pct_changes = sec_plot_data['Pct_Change'].tolist()
+    p_values = sec_plot_data['P_Value'].tolist()
+    
     # Chart 1: Before vs After
     fig.add_trace(
         go.Bar(
             name='Before Tariff',
-            x=sec_plot_data['Security_Type'],
-            y=sec_plot_data['Pre_2025_Avg']/1000,
+            x=security_types,
+            y=pre_values,
             marker_color=colors['before'],
             opacity=0.8,
-            text=[f'${val/1000:,.0f}K' for val in sec_plot_data['Pre_2025_Avg']],
-            textposition='outside',
             hovertemplate='<b>%{x}</b><br>Before: $%{y:,.0f}K<extra></extra>'
         ),
         row=1, col=1
@@ -643,78 +651,75 @@ if len(sec_significant) > 0:
     fig.add_trace(
         go.Bar(
             name='After Tariff',
-            x=sec_plot_data['Security_Type'],
-            y=sec_plot_data['Post_2025_Avg']/1000,
+            x=security_types,
+            y=post_values,
             marker_color=colors['after'],
             opacity=0.8,
-            text=[f'${val/1000:,.0f}K' for val in sec_plot_data['Post_2025_Avg']],
-            textposition='outside',
             hovertemplate='<b>%{x}</b><br>After: $%{y:,.0f}K<extra></extra>'
         ),
         row=1, col=1
     )
     
-    # Add percentage change annotations
-    for i, (idx, row) in enumerate(sec_plot_data.iterrows()):
-        pct_change = row['Pct_Change']
-        color = colors['positive'] if pct_change > 0 else colors['negative']
-        y_pos = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000 * 1.15
-        
-        fig.add_annotation(
-            x=row['Security_Type'],
-            y=y_pos,
-            text=f'<b>{pct_change:+.1f}%</b>',
-            showarrow=False,
-            font=dict(color=color, size=12),
-            row=1, col=1
-        )
-    
     # Chart 2: DiD Effects
-    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in sec_plot_data['DiD_Effect_Mean']]
+    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in did_values]
     
     fig.add_trace(
         go.Bar(
             name='DiD Effect',
-            x=sec_plot_data['Security_Type'],
-            y=sec_plot_data['DiD_Effect_Mean']/1000,
+            x=security_types,
+            y=did_values,
             marker_color=bar_colors,
             opacity=0.8,
-            text=[f'${val/1000:,.0f}K' for val in sec_plot_data['DiD_Effect_Mean']],
-            textposition='outside',
             hovertemplate='<b>%{x}</b><br>DiD Effect: $%{y:,.0f}K<br>P-value: %{customdata:.4f}<extra></extra>',
-            customdata=sec_plot_data['P_Value'],
+            customdata=p_values,
             showlegend=False
         ),
         row=1, col=2
     )
     
-    # Add significance stars
-    for i, (idx, row) in enumerate(sec_plot_data.iterrows()):
-        if row['P_Value'] < 0.001:
-            marker = '***'
-        elif row['P_Value'] < 0.01:
-            marker = '**'
-        elif row['P_Value'] < 0.05:
-            marker = '*'
-        else:
-            marker = ''
-        
-        if marker:
-            y_pos = row['DiD_Effect_Mean']/1000
-            y_offset = abs(y_pos) * 0.1 + 50
-            y_annotation = y_pos + y_offset if y_pos >= 0 else y_pos - y_offset
-            
-            fig.add_annotation(
-                x=row['Security_Type'],
-                y=y_annotation,
-                text=f'<b>{marker}</b>',
-                showarrow=False,
-                font=dict(color='black', size=16),
-                row=1, col=2
-            )
-    
     # Add horizontal line at zero for DiD chart
     fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1, row=1, col=2)
+    
+    # Add annotations in bulk (optimized)
+    annotations = []
+    
+    # Percentage change annotations
+    for i, (sec_type, pct_change, pre_val, post_val) in enumerate(zip(security_types, pct_changes, pre_values, post_values)):
+        color = colors['positive'] if pct_change > 0 else colors['negative']
+        y_pos = max(pre_val, post_val) * 1.15
+        
+        annotations.append(
+            dict(
+                x=sec_type, y=y_pos, text=f'<b>{pct_change:+.1f}%</b>',
+                showarrow=False, font=dict(color=color, size=12),
+                xref='x', yref='y'
+            )
+        )
+    
+    # Significance annotations
+    for i, (sec_type, p_val, did_val) in enumerate(zip(security_types, p_values, did_values)):
+        if p_val < 0.001:
+            marker = '***'
+        elif p_val < 0.01:
+            marker = '**'
+        elif p_val < 0.05:
+            marker = '*'
+        else:
+            continue
+        
+        y_offset = abs(did_val) * 0.15 + 20
+        y_annotation = did_val + y_offset if did_val >= 0 else did_val - y_offset
+        
+        annotations.append(
+            dict(
+                x=sec_type, y=y_annotation, text=f'<b>{marker}</b>',
+                showarrow=False, font=dict(color='black', size=16),
+                xref='x2', yref='y2'
+            )
+        )
+    
+    # Add all annotations at once
+    fig.update_layout(annotations=annotations)
     
     # Update layout
     fig.update_layout(
@@ -745,6 +750,7 @@ if len(sec_significant) > 0:
     fig.update_yaxes(title_text="DiD Effect (Thousands $)", row=1, col=2)
     
     # Save as high-quality image
+    print("Saving security type chart...")
     fig.write_image("security_type_analysis.png", width=1400, height=600, scale=2)
     fig.show()
 
@@ -769,9 +775,11 @@ if len(ind_significant) > 0:
     
     # Select top 7 by absolute change magnitude
     ind_significant['Abs_Change_Magnitude'] = ind_significant['Abs_Change'].abs()
-    ind_plot_data = ind_significant.nlargest(7, 'Abs_Change_Magnitude')
+    ind_plot_data = ind_significant.nlargest(min(7, len(ind_significant)), 'Abs_Change_Magnitude').reset_index(drop=True)
     
-    # Truncate long industry names
+    print(f"Creating charts for {len(ind_plot_data)} industries...")
+    
+    # Truncate long industry names (vectorized)
     ind_plot_data['Industry_Short'] = [name[:25] + '...' if len(name) > 25 else name for name in ind_plot_data['Industry']]
     
     # Create subplots
@@ -781,16 +789,22 @@ if len(ind_significant) > 0:
         specs=[[{"secondary_y": False}, {"secondary_y": False}]]
     )
     
+    # Prepare data for plotting (vectorized)
+    industry_names = ind_plot_data['Industry_Short'].tolist()
+    pre_values = (ind_plot_data['Pre_2025_Avg']/1000).tolist()
+    post_values = (ind_plot_data['Post_2025_Avg']/1000).tolist()
+    did_values = (ind_plot_data['DiD_Effect_Mean']/1000).tolist()
+    pct_changes = ind_plot_data['Pct_Change'].tolist()
+    p_values = ind_plot_data['P_Value'].tolist()
+    
     # Chart 1: Before vs After
     fig.add_trace(
         go.Bar(
             name='Before Tariff',
-            x=ind_plot_data['Industry_Short'],
-            y=ind_plot_data['Pre_2025_Avg']/1000,
+            x=industry_names,
+            y=pre_values,
             marker_color='#2ecc71',  # Green
             opacity=0.8,
-            text=[f'${val/1000:,.0f}K' for val in ind_plot_data['Pre_2025_Avg']],
-            textposition='outside',
             hovertemplate='<b>%{x}</b><br>Before: $%{y:,.0f}K<extra></extra>'
         ),
         row=1, col=1
@@ -799,78 +813,75 @@ if len(ind_significant) > 0:
     fig.add_trace(
         go.Bar(
             name='After Tariff',
-            x=ind_plot_data['Industry_Short'],
-            y=ind_plot_data['Post_2025_Avg']/1000,
+            x=industry_names,
+            y=post_values,
             marker_color='#f39c12',  # Orange
             opacity=0.8,
-            text=[f'${val/1000:,.0f}K' for val in ind_plot_data['Post_2025_Avg']],
-            textposition='outside',
             hovertemplate='<b>%{x}</b><br>After: $%{y:,.0f}K<extra></extra>'
         ),
         row=1, col=1
     )
     
-    # Add percentage change annotations
-    for i, (idx, row) in enumerate(ind_plot_data.iterrows()):
-        pct_change = row['Pct_Change']
-        color = colors['positive'] if pct_change > 0 else colors['negative']
-        y_pos = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000 * 1.15
-        
-        fig.add_annotation(
-            x=row['Industry_Short'],
-            y=y_pos,
-            text=f'<b>{pct_change:+.1f}%</b>',
-            showarrow=False,
-            font=dict(color=color, size=12),
-            row=1, col=1
-        )
-    
     # Chart 2: DiD Effects
-    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in ind_plot_data['DiD_Effect_Mean']]
+    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in did_values]
     
     fig.add_trace(
         go.Bar(
             name='DiD Effect',
-            x=ind_plot_data['Industry_Short'],
-            y=ind_plot_data['DiD_Effect_Mean']/1000,
+            x=industry_names,
+            y=did_values,
             marker_color=bar_colors,
             opacity=0.8,
-            text=[f'${val/1000:,.0f}K' for val in ind_plot_data['DiD_Effect_Mean']],
-            textposition='outside',
             hovertemplate='<b>%{x}</b><br>DiD Effect: $%{y:,.0f}K<br>P-value: %{customdata:.4f}<extra></extra>',
-            customdata=ind_plot_data['P_Value'],
+            customdata=p_values,
             showlegend=False
         ),
         row=1, col=2
     )
     
-    # Add significance stars
-    for i, (idx, row) in enumerate(ind_plot_data.iterrows()):
-        if row['P_Value'] < 0.001:
-            marker = '***'
-        elif row['P_Value'] < 0.01:
-            marker = '**'
-        elif row['P_Value'] < 0.05:
-            marker = '*'
-        else:
-            marker = ''
-        
-        if marker:
-            y_pos = row['DiD_Effect_Mean']/1000
-            y_offset = abs(y_pos) * 0.1 + 50
-            y_annotation = y_pos + y_offset if y_pos >= 0 else y_pos - y_offset
-            
-            fig.add_annotation(
-                x=row['Industry_Short'],
-                y=y_annotation,
-                text=f'<b>{marker}</b>',
-                showarrow=False,
-                font=dict(color='black', size=16),
-                row=1, col=2
-            )
-    
     # Add horizontal line at zero for DiD chart
     fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1, row=1, col=2)
+    
+    # Add annotations in bulk (optimized)
+    annotations = []
+    
+    # Percentage change annotations
+    for i, (ind_name, pct_change, pre_val, post_val) in enumerate(zip(industry_names, pct_changes, pre_values, post_values)):
+        color = colors['positive'] if pct_change > 0 else colors['negative']
+        y_pos = max(pre_val, post_val) * 1.15
+        
+        annotations.append(
+            dict(
+                x=ind_name, y=y_pos, text=f'<b>{pct_change:+.1f}%</b>',
+                showarrow=False, font=dict(color=color, size=12),
+                xref='x', yref='y'
+            )
+        )
+    
+    # Significance annotations
+    for i, (ind_name, p_val, did_val) in enumerate(zip(industry_names, p_values, did_values)):
+        if p_val < 0.001:
+            marker = '***'
+        elif p_val < 0.01:
+            marker = '**'
+        elif p_val < 0.05:
+            marker = '*'
+        else:
+            continue
+        
+        y_offset = abs(did_val) * 0.15 + 20
+        y_annotation = did_val + y_offset if did_val >= 0 else did_val - y_offset
+        
+        annotations.append(
+            dict(
+                x=ind_name, y=y_annotation, text=f'<b>{marker}</b>',
+                showarrow=False, font=dict(color='black', size=16),
+                xref='x2', yref='y2'
+            )
+        )
+    
+    # Add all annotations at once
+    fig.update_layout(annotations=annotations)
     
     # Update layout
     fig.update_layout(
@@ -901,6 +912,7 @@ if len(ind_significant) > 0:
     fig.update_yaxes(title_text="DiD Effect (Thousands $)", row=1, col=2)
     
     # Save as high-quality image
+    print("Saving industry chart...")
     fig.write_image("industry_analysis.png", width=1400, height=600, scale=2)
     fig.show()
 
