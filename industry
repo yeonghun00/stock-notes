@@ -1,0 +1,225 @@
+# 5. Industry Impact Analysis with Enhanced Visualizations
+print("\n5. INDUSTRY IMPACT ANALYSIS")
+print("-" * 40)
+
+# Calculate industry impact
+industry_customers = df.groupby('Customer_Industry')['Customer_Name'].nunique()
+industry_impact = df[df['Period'].isin(['Pre-April', 'Post-April'])].groupby(['Customer_Industry', 'Period'])['Amount'].sum().unstack(fill_value=0)
+
+# Add customer count
+industry_impact['Customer_Count'] = industry_customers
+industry_impact['Change_%'] = 0  # Initialize
+
+# Calculate change only if both periods exist
+if 'Pre-April' in industry_impact.columns and 'Post-April' in industry_impact.columns:
+    mask = industry_impact['Pre-April'] != 0
+    industry_impact.loc[mask, 'Change_%'] = (
+        (industry_impact.loc[mask, 'Post-April'] - industry_impact.loc[mask, 'Pre-April']) / 
+        industry_impact.loc[mask, 'Pre-April'].abs() * 100
+    ).round(2)
+
+# Filter industries with at least 10 customers
+significant_industries = industry_impact[industry_impact['Customer_Count'] >= 10]
+industry_ranking = significant_industries.sort_values('Change_%', ascending=False)
+
+# Create comprehensive industry impact visualization
+fig = plt.figure(figsize=(20, 12))
+gs = fig.add_gridspec(3, 2, height_ratios=[2, 1.5, 1], hspace=0.3, wspace=0.3)
+
+# 1. Main Industry Impact Bar Chart (Top)
+ax1 = fig.add_subplot(gs[0, :])
+
+# Get top 10 increasers and decreasers
+top_increasers = industry_ranking.head(10)
+top_decreasers = industry_ranking.tail(10)
+combined_industries = pd.concat([top_increasers, top_decreasers])
+
+# Create color map
+colors = []
+for val in combined_industries['Change_%']:
+    if val > 50:
+        colors.append('#2E7D32')  # Dark green
+    elif val > 0:
+        colors.append('#66BB6A')  # Light green
+    elif val > -50:
+        colors.append('#EF5350')  # Light red
+    else:
+        colors.append('#C62828')  # Dark red
+
+# Create horizontal bar chart
+y_pos = np.arange(len(combined_industries))
+bars = ax1.barh(y_pos, combined_industries['Change_%'], color=colors, alpha=0.8)
+
+# Add value labels
+for i, (bar, count) in enumerate(zip(bars, combined_industries['Customer_Count'])):
+    width = bar.get_width()
+    label_x_pos = width + 5 if width > 0 else width - 5
+    ax1.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
+             f'{width:.1f}%', ha='left' if width > 0 else 'right', 
+             va='center', fontsize=10, fontweight='bold')
+    # Add customer count
+    ax1.text(5 if width > 0 else -5, bar.get_y() + bar.get_height()/2, 
+             f'({count} customers)', ha='left' if width > 0 else 'right', 
+             va='center', fontsize=8, alpha=0.7)
+
+ax1.set_yticks(y_pos)
+ax1.set_yticklabels(combined_industries.index, fontsize=11)
+ax1.set_xlabel('Percentage Change (%)', fontsize=12, fontweight='bold')
+ax1.set_title('Industry Impact: Top Winners and Losers', fontsize=16, fontweight='bold', pad=20)
+ax1.axvline(x=0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+ax1.grid(True, axis='x', alpha=0.3)
+ax1.set_xlim(-500, 200)
+
+# Add background shading
+ax1.axvspan(-500, 0, alpha=0.05, color='red')
+ax1.axvspan(0, 200, alpha=0.05, color='green')
+
+# 2. Industry Volume Comparison (Bottom Left)
+ax2 = fig.add_subplot(gs[1, 0])
+
+# Select top 10 by total volume
+top_volume_industries = industry_impact.nlargest(10, 'Customer_Count')
+x = np.arange(len(top_volume_industries))
+width = 0.35
+
+pre_volumes = top_volume_industries['Pre-April'] / 1e6
+post_volumes = top_volume_industries['Post-April'] / 1e6
+
+bars1 = ax2.bar(x - width/2, pre_volumes, width, label='Pre-April', color='#90CAF9', alpha=0.8)
+bars2 = ax2.bar(x + width/2, post_volumes, width, label='Post-April', color='#1976D2', alpha=0.8)
+
+ax2.set_xlabel('Industry', fontsize=11, fontweight='bold')
+ax2.set_ylabel('Trading Volume (Million $)', fontsize=11, fontweight='bold')
+ax2.set_title('Trading Volume by Industry', fontsize=13, fontweight='bold')
+ax2.set_xticks(x)
+ax2.set_xticklabels(top_volume_industries.index, rotation=45, ha='right')
+ax2.legend()
+ax2.grid(True, axis='y', alpha=0.3)
+
+# Add value labels on bars
+def autolabel(ax, bars):
+    for bar in bars:
+        height = bar.get_height()
+        if height > 0:
+            ax.annotate(f'{height:.0f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3),
+                       textcoords="offset points",
+                       ha='center', va='bottom', fontsize=8)
+
+autolabel(ax2, bars1)
+autolabel(ax2, bars2)
+
+# 3. Impact Distribution (Bottom Right)
+ax3 = fig.add_subplot(gs[1, 1])
+
+# Create histogram of changes
+change_data = industry_ranking['Change_%'].values
+bins = [-500, -200, -100, -50, 0, 50, 100, 200]
+counts, _ = np.histogram(change_data, bins=bins)
+
+colors_hist = ['#C62828', '#EF5350', '#FFCDD2', '#C8E6C9', '#66BB6A', '#2E7D32']
+ax3.bar(range(len(counts)), counts, color=colors_hist[:len(counts)], alpha=0.8)
+ax3.set_xticks(range(len(counts)))
+ax3.set_xticklabels([f'{bins[i]} to {bins[i+1]}%' for i in range(len(counts))], rotation=45, ha='right')
+ax3.set_ylabel('Number of Industries', fontsize=11, fontweight='bold')
+ax3.set_title('Distribution of Industry Changes', fontsize=13, fontweight='bold')
+ax3.grid(True, axis='y', alpha=0.3)
+
+# Add count labels
+for i, count in enumerate(counts):
+    if count > 0:
+        ax3.text(i, count + 0.1, str(count), ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+# 4. Summary Statistics Box (Bottom)
+ax4 = fig.add_subplot(gs[2, :])
+ax4.axis('off')
+
+# Calculate summary statistics
+total_industries = len(significant_industries)
+positive_change = len(significant_industries[significant_industries['Change_%'] > 0])
+negative_change = len(significant_industries[significant_industries['Change_%'] < 0])
+avg_change = significant_industries['Change_%'].mean()
+median_change = significant_industries['Change_%'].median()
+
+# Create summary text
+summary_text = f"""
+Summary Statistics (Industries with 10+ customers):
+- Total Industries Analyzed: {total_industries}
+- Industries with Positive Change: {positive_change} ({positive_change/total_industries*100:.1f}%)
+- Industries with Negative Change: {negative_change} ({negative_change/total_industries*100:.1f}%)
+- Average Change: {avg_change:.1f}%
+- Median Change: {median_change:.1f}%
+- Largest Increase: {industry_ranking.iloc[0]['Change_%']:.1f}% ({industry_ranking.index[0]})
+- Largest Decrease: {industry_ranking.iloc[-1]['Change_%']:.1f}% ({industry_ranking.index[-1]})
+"""
+
+ax4.text(0.5, 0.5, summary_text, transform=ax4.transAxes, 
+         fontsize=12, verticalalignment='center', horizontalalignment='center',
+         bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.2))
+
+plt.suptitle('Industry Impact Analysis - April 2, 2025 Tariff Event', fontsize=18, fontweight='bold', y=0.98)
+plt.savefig('april_industry_impact_comprehensive.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# Create a simple heatmap for top industries
+fig, ax = plt.subplots(figsize=(12, 8))
+
+# Get top 15 industries by absolute change
+top_impact_industries = industry_ranking.reindex(
+    industry_ranking['Change_%'].abs().nlargest(15).index
+).sort_values('Change_%', ascending=True)
+
+# Create color gradient
+colors = plt.cm.RdYlGn(np.linspace(0, 1, len(top_impact_industries)))
+change_normalized = (top_impact_industries['Change_%'] - top_impact_industries['Change_%'].min()) / \
+                   (top_impact_industries['Change_%'].max() - top_impact_industries['Change_%'].min())
+
+bars = ax.barh(range(len(top_impact_industries)), top_impact_industries['Change_%'], 
+               color=plt.cm.RdYlGn(change_normalized))
+
+# Add value labels
+for i, (idx, row) in enumerate(top_impact_industries.iterrows()):
+    change = row['Change_%']
+    customers = row['Customer_Count']
+    
+    # Change percentage label
+    label_x = change + 10 if change > 0 else change - 10
+    ax.text(label_x, i, f'{change:.1f}%', 
+            ha='left' if change > 0 else 'right', va='center', 
+            fontsize=11, fontweight='bold')
+    
+    # Customer count label
+    ax.text(5 if change > 0 else -5, i, f'{customers} customers', 
+            ha='left' if change > 0 else 'right', va='center', 
+            fontsize=9, alpha=0.7, style='italic')
+
+ax.set_yticks(range(len(top_impact_industries)))
+ax.set_yticklabels(top_impact_industries.index, fontsize=11)
+ax.set_xlabel('Percentage Change (%)', fontsize=12, fontweight='bold')
+ax.set_title('Top 15 Industries by Impact Magnitude', fontsize=16, fontweight='bold', pad=20)
+ax.axvline(x=0, color='black', linestyle='-', alpha=0.5, linewidth=2)
+ax.grid(True, axis='x', alpha=0.3)
+
+# Add gradient legend
+sm = plt.cm.ScalarMappable(cmap=plt.cm.RdYlGn, 
+                           norm=plt.Normalize(vmin=top_impact_industries['Change_%'].min(), 
+                                            vmax=top_impact_industries['Change_%'].max()))
+sm.set_array([])
+cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', pad=0.05, shrink=0.5)
+cbar.set_label('Impact Scale', fontsize=10)
+
+plt.tight_layout()
+plt.savefig('april_industry_heatmap.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# Print results
+print("\nIndustry Impact Ranking (Industries with 10+ customers):")
+print("\nTop 10 Increasers:")
+print(industry_ranking[['Change_%', 'Customer_Count']].head(10))
+print("\nTop 10 Decreasers:")
+print(industry_ranking[['Change_%', 'Customer_Count']].tail(10))
+
+print("\nVisualization files created:")
+print("- april_industry_impact_comprehensive.png (Full analysis)")
+print("- april_industry_heatmap.png (Top 15 impact visualization)")
