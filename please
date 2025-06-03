@@ -583,19 +583,23 @@ print("\n--- Analysis Complete ---")
 
 
 
+# --- 7. VISUALIZATION FOR PPT (PLOTLY) ---
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
 
-
-# --- 7. VISUALIZATION FOR PPT ---
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.patches import Rectangle
-
-# Set style for professional charts
-plt.style.use('default')
-sns.set_palette("husl")
+# Set professional color palette
+colors = {
+    'before': '#3498db',  # Blue
+    'after': '#e74c3c',   # Red
+    'positive': '#27ae60', # Green
+    'negative': '#e74c3c', # Red
+    'background': '#f8f9fa',
+    'text': '#2c3e50'
+}
 
 # --- Security Type Visualizations ---
-print("\n--- Creating Security Type Visualizations ---")
+print("\n--- Creating Security Type Visualizations (Plotly) ---")
 
 # Filter significant security types and top 7 by absolute change
 sec_significant = sec_results_df[
@@ -611,51 +615,80 @@ if len(sec_significant) > 0:
     sec_significant['Abs_Change'] = sec_significant['Post_2025_Avg'] - sec_significant['Pre_2025_Avg']
     
     # Select top 7 by absolute change magnitude
-    sec_plot_data = sec_significant.nlargest(7, sec_significant['Abs_Change'].abs())
+    sec_significant['Abs_Change_Magnitude'] = sec_significant['Abs_Change'].abs()
+    sec_plot_data = sec_significant.nlargest(7, 'Abs_Change_Magnitude')
     
-    # Chart 1: Before vs After with Percentage Change
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    # Create subplots
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Net Buy: Before vs After Tariff', 'Difference-in-Differences Impact'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}]]
+    )
     
-    # Before vs After Bar Chart
-    x_pos = range(len(sec_plot_data))
-    width = 0.35
+    # Chart 1: Before vs After
+    fig.add_trace(
+        go.Bar(
+            name='Before Tariff',
+            x=sec_plot_data['Security_Type'],
+            y=sec_plot_data['Pre_2025_Avg']/1000,
+            marker_color=colors['before'],
+            opacity=0.8,
+            text=[f'${val/1000:,.0f}K' for val in sec_plot_data['Pre_2025_Avg']],
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>Before: $%{y:,.0f}K<extra></extra>'
+        ),
+        row=1, col=1
+    )
     
-    bars1 = ax1.bar([x - width/2 for x in x_pos], sec_plot_data['Pre_2025_Avg']/1000, 
-                    width, label='Before Tariff', color='lightblue', alpha=0.8)
-    bars2 = ax1.bar([x + width/2 for x in x_pos], sec_plot_data['Post_2025_Avg']/1000, 
-                    width, label='After Tariff', color='coral', alpha=0.8)
+    fig.add_trace(
+        go.Bar(
+            name='After Tariff',
+            x=sec_plot_data['Security_Type'],
+            y=sec_plot_data['Post_2025_Avg']/1000,
+            marker_color=colors['after'],
+            opacity=0.8,
+            text=[f'${val/1000:,.0f}K' for val in sec_plot_data['Post_2025_Avg']],
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>After: $%{y:,.0f}K<extra></extra>'
+        ),
+        row=1, col=1
+    )
     
-    ax1.set_xlabel('Security Type', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Average Net Buy (Thousands $)', fontsize=12, fontweight='bold')
-    ax1.set_title('Net Buy: Before vs After Tariff by Security Type', fontsize=14, fontweight='bold')
-    ax1.set_xticks(x_pos)
-    ax1.set_xticklabels(sec_plot_data['Security_Type'], rotation=45, ha='right')
-    ax1.legend()
-    ax1.grid(axis='y', alpha=0.3)
-    
-    # Add percentage change labels
+    # Add percentage change annotations
     for i, (idx, row) in enumerate(sec_plot_data.iterrows()):
         pct_change = row['Pct_Change']
-        color = 'green' if pct_change > 0 else 'red'
-        max_val = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000
-        ax1.text(i, max_val + abs(max_val) * 0.1,
-                f'{pct_change:+.1f}%', ha='center', va='bottom', 
-                fontweight='bold', color=color, fontsize=10)
+        color = colors['positive'] if pct_change > 0 else colors['negative']
+        y_pos = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000 * 1.15
+        
+        fig.add_annotation(
+            x=row['Security_Type'],
+            y=y_pos,
+            text=f'<b>{pct_change:+.1f}%</b>',
+            showarrow=False,
+            font=dict(color=color, size=12),
+            row=1, col=1
+        )
     
     # Chart 2: DiD Effects
-    colors = ['green' if x > 0 else 'red' for x in sec_plot_data['DiD_Effect_Mean']]
-    bars = ax2.bar(range(len(sec_plot_data)), sec_plot_data['DiD_Effect_Mean']/1000, 
-                   color=colors, alpha=0.7)
+    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in sec_plot_data['DiD_Effect_Mean']]
     
-    ax2.set_xlabel('Security Type', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('DiD Effect (Thousands $)', fontsize=12, fontweight='bold')
-    ax2.set_title('Difference-in-Differences Impact by Security Type', fontsize=14, fontweight='bold')
-    ax2.set_xticks(range(len(sec_plot_data)))
-    ax2.set_xticklabels(sec_plot_data['Security_Type'], rotation=45, ha='right')
-    ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
-    ax2.grid(axis='y', alpha=0.3)
+    fig.add_trace(
+        go.Bar(
+            name='DiD Effect',
+            x=sec_plot_data['Security_Type'],
+            y=sec_plot_data['DiD_Effect_Mean']/1000,
+            marker_color=bar_colors,
+            opacity=0.8,
+            text=[f'${val/1000:,.0f}K' for val in sec_plot_data['DiD_Effect_Mean']],
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>DiD Effect: $%{y:,.0f}K<br>P-value: %{customdata:.4f}<extra></extra>',
+            customdata=sec_plot_data['P_Value'],
+            showlegend=False
+        ),
+        row=1, col=2
+    )
     
-    # Add significance markers
+    # Add significance stars
     for i, (idx, row) in enumerate(sec_plot_data.iterrows()):
         if row['P_Value'] < 0.001:
             marker = '***'
@@ -666,22 +699,60 @@ if len(sec_significant) > 0:
         else:
             marker = ''
         
-        y_pos = row['DiD_Effect_Mean']/1000
-        y_range = max(sec_plot_data['DiD_Effect_Mean'].max(), abs(sec_plot_data['DiD_Effect_Mean'].min()))/1000
-        offset = 0.05 * y_range
-        ax2.text(i, y_pos + offset if y_pos >= 0 else y_pos - offset, 
-                marker, ha='center', va='bottom' if y_pos >= 0 else 'top', 
-                fontsize=14, fontweight='bold')
+        if marker:
+            y_pos = row['DiD_Effect_Mean']/1000
+            y_offset = abs(y_pos) * 0.1 + 50
+            y_annotation = y_pos + y_offset if y_pos >= 0 else y_pos - y_offset
+            
+            fig.add_annotation(
+                x=row['Security_Type'],
+                y=y_annotation,
+                text=f'<b>{marker}</b>',
+                showarrow=False,
+                font=dict(color='black', size=16),
+                row=1, col=2
+            )
     
-    plt.tight_layout()
-    plt.savefig('security_type_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    # Add horizontal line at zero for DiD chart
+    fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1, row=1, col=2)
+    
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text='<b>Tariff Impact Analysis: Security Types</b>',
+            x=0.5,
+            font=dict(size=20, color=colors['text'])
+        ),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.2,
+            xanchor="center",
+            x=0.25
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(size=12, color=colors['text']),
+        height=600,
+        width=1400
+    )
+    
+    # Update axes
+    fig.update_xaxes(title_text="Security Type", row=1, col=1, tickangle=45)
+    fig.update_xaxes(title_text="Security Type", row=1, col=2, tickangle=45)
+    fig.update_yaxes(title_text="Net Buy (Thousands $)", row=1, col=1)
+    fig.update_yaxes(title_text="DiD Effect (Thousands $)", row=1, col=2)
+    
+    # Save as high-quality image
+    fig.write_image("security_type_analysis.png", width=1400, height=600, scale=2)
+    fig.show()
 
 else:
     print("No significant security type changes found for visualization")
 
 # --- Industry Visualizations ---
-print("\n--- Creating Industry Visualizations ---")
+print("\n--- Creating Industry Visualizations (Plotly) ---")
 
 # Filter significant industries and top 7 by absolute change
 ind_significant = ind_results_df[
@@ -697,53 +768,83 @@ if len(ind_significant) > 0:
     ind_significant['Abs_Change'] = ind_significant['Post_2025_Avg'] - ind_significant['Pre_2025_Avg']
     
     # Select top 7 by absolute change magnitude
-    ind_plot_data = ind_significant.nlargest(7, ind_significant['Abs_Change'].abs())
+    ind_significant['Abs_Change_Magnitude'] = ind_significant['Abs_Change'].abs()
+    ind_plot_data = ind_significant.nlargest(7, 'Abs_Change_Magnitude')
     
-    # Chart 1: Before vs After with Percentage Change
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    # Truncate long industry names
+    ind_plot_data['Industry_Short'] = [name[:25] + '...' if len(name) > 25 else name for name in ind_plot_data['Industry']]
     
-    # Before vs After Bar Chart
-    x_pos = range(len(ind_plot_data))
-    width = 0.35
+    # Create subplots
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Net Buy: Before vs After Tariff', 'Difference-in-Differences Impact'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}]]
+    )
     
-    bars1 = ax1.bar([x - width/2 for x in x_pos], ind_plot_data['Pre_2025_Avg']/1000, 
-                    width, label='Before Tariff', color='lightgreen', alpha=0.8)
-    bars2 = ax1.bar([x + width/2 for x in x_pos], ind_plot_data['Post_2025_Avg']/1000, 
-                    width, label='After Tariff', color='orange', alpha=0.8)
+    # Chart 1: Before vs After
+    fig.add_trace(
+        go.Bar(
+            name='Before Tariff',
+            x=ind_plot_data['Industry_Short'],
+            y=ind_plot_data['Pre_2025_Avg']/1000,
+            marker_color='#2ecc71',  # Green
+            opacity=0.8,
+            text=[f'${val/1000:,.0f}K' for val in ind_plot_data['Pre_2025_Avg']],
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>Before: $%{y:,.0f}K<extra></extra>'
+        ),
+        row=1, col=1
+    )
     
-    ax1.set_xlabel('Industry', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Average Net Buy (Thousands $)', fontsize=12, fontweight='bold')
-    ax1.set_title('Net Buy: Before vs After Tariff by Industry', fontsize=14, fontweight='bold')
-    ax1.set_xticks(x_pos)
-    # Truncate long industry names for better display
-    industry_labels = [name[:20] + '...' if len(name) > 20 else name for name in ind_plot_data['Industry']]
-    ax1.set_xticklabels(industry_labels, rotation=45, ha='right')
-    ax1.legend()
-    ax1.grid(axis='y', alpha=0.3)
+    fig.add_trace(
+        go.Bar(
+            name='After Tariff',
+            x=ind_plot_data['Industry_Short'],
+            y=ind_plot_data['Post_2025_Avg']/1000,
+            marker_color='#f39c12',  # Orange
+            opacity=0.8,
+            text=[f'${val/1000:,.0f}K' for val in ind_plot_data['Post_2025_Avg']],
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>After: $%{y:,.0f}K<extra></extra>'
+        ),
+        row=1, col=1
+    )
     
-    # Add percentage change labels
+    # Add percentage change annotations
     for i, (idx, row) in enumerate(ind_plot_data.iterrows()):
         pct_change = row['Pct_Change']
-        color = 'green' if pct_change > 0 else 'red'
-        max_val = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000
-        ax1.text(i, max_val + abs(max_val) * 0.1,
-                f'{pct_change:+.1f}%', ha='center', va='bottom', 
-                fontweight='bold', color=color, fontsize=10)
+        color = colors['positive'] if pct_change > 0 else colors['negative']
+        y_pos = max(row['Pre_2025_Avg'], row['Post_2025_Avg'])/1000 * 1.15
+        
+        fig.add_annotation(
+            x=row['Industry_Short'],
+            y=y_pos,
+            text=f'<b>{pct_change:+.1f}%</b>',
+            showarrow=False,
+            font=dict(color=color, size=12),
+            row=1, col=1
+        )
     
     # Chart 2: DiD Effects
-    colors = ['green' if x > 0 else 'red' for x in ind_plot_data['DiD_Effect_Mean']]
-    bars = ax2.bar(range(len(ind_plot_data)), ind_plot_data['DiD_Effect_Mean']/1000, 
-                   color=colors, alpha=0.7)
+    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in ind_plot_data['DiD_Effect_Mean']]
     
-    ax2.set_xlabel('Industry', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('DiD Effect (Thousands $)', fontsize=12, fontweight='bold')
-    ax2.set_title('Difference-in-Differences Impact by Industry', fontsize=14, fontweight='bold')
-    ax2.set_xticks(range(len(ind_plot_data)))
-    ax2.set_xticklabels(industry_labels, rotation=45, ha='right')
-    ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
-    ax2.grid(axis='y', alpha=0.3)
+    fig.add_trace(
+        go.Bar(
+            name='DiD Effect',
+            x=ind_plot_data['Industry_Short'],
+            y=ind_plot_data['DiD_Effect_Mean']/1000,
+            marker_color=bar_colors,
+            opacity=0.8,
+            text=[f'${val/1000:,.0f}K' for val in ind_plot_data['DiD_Effect_Mean']],
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>DiD Effect: $%{y:,.0f}K<br>P-value: %{customdata:.4f}<extra></extra>',
+            customdata=ind_plot_data['P_Value'],
+            showlegend=False
+        ),
+        row=1, col=2
+    )
     
-    # Add significance markers
+    # Add significance stars
     for i, (idx, row) in enumerate(ind_plot_data.iterrows()):
         if row['P_Value'] < 0.001:
             marker = '***'
@@ -754,16 +855,54 @@ if len(ind_significant) > 0:
         else:
             marker = ''
         
-        y_pos = row['DiD_Effect_Mean']/1000
-        y_range = max(ind_plot_data['DiD_Effect_Mean'].max(), abs(ind_plot_data['DiD_Effect_Mean'].min()))/1000
-        offset = 0.05 * y_range
-        ax2.text(i, y_pos + offset if y_pos >= 0 else y_pos - offset, 
-                marker, ha='center', va='bottom' if y_pos >= 0 else 'top', 
-                fontsize=14, fontweight='bold')
+        if marker:
+            y_pos = row['DiD_Effect_Mean']/1000
+            y_offset = abs(y_pos) * 0.1 + 50
+            y_annotation = y_pos + y_offset if y_pos >= 0 else y_pos - y_offset
+            
+            fig.add_annotation(
+                x=row['Industry_Short'],
+                y=y_annotation,
+                text=f'<b>{marker}</b>',
+                showarrow=False,
+                font=dict(color='black', size=16),
+                row=1, col=2
+            )
     
-    plt.tight_layout()
-    plt.savefig('industry_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    # Add horizontal line at zero for DiD chart
+    fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1, row=1, col=2)
+    
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text='<b>Tariff Impact Analysis: Industries</b>',
+            x=0.5,
+            font=dict(size=20, color=colors['text'])
+        ),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.3,
+            xanchor="center",
+            x=0.25
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(size=12, color=colors['text']),
+        height=600,
+        width=1400
+    )
+    
+    # Update axes
+    fig.update_xaxes(title_text="Industry", row=1, col=1, tickangle=45)
+    fig.update_xaxes(title_text="Industry", row=1, col=2, tickangle=45)
+    fig.update_yaxes(title_text="Net Buy (Thousands $)", row=1, col=1)
+    fig.update_yaxes(title_text="DiD Effect (Thousands $)", row=1, col=2)
+    
+    # Save as high-quality image
+    fig.write_image("industry_analysis.png", width=1400, height=600, scale=2)
+    fig.show()
 
 else:
     print("No significant industry changes found for visualization")
@@ -783,6 +922,6 @@ if len(ind_significant) > 0:
         print(f"  - {row['Industry'][:30]}: {row['Pct_Change']:+.1f}% change, DiD: ${row['DiD_Effect_Mean']:,.0f}")
 
 print("\nChart files saved:")
-print("- security_type_analysis.png (for Security Type slide)")
-print("- industry_analysis.png (for Industry slide)")
+print("- security_type_analysis.png (Professional Plotly chart)")
+print("- industry_analysis.png (Professional Plotly chart)")
 print("\nSignificance markers: *** p<0.001, ** p<0.01, * p<0.05")
