@@ -1,425 +1,315 @@
-# Industry Impact Statistical Significance Test with Seasonality Control
-print("\n6. INDUSTRY IMPACT STATISTICAL SIGNIFICANCE TEST")
-print("-" * 60)
+import pandas as pd
+import numpy as np
+from scipy import stats
+import statsmodels.formula.api as smf # For regression-based DiD
 
-# 1. Chi-square test for industry distribution change
-def test_industry_significance(df, event_date):
-    """Test if industry distribution changed significantly"""
-    pre_data = df[df['Date'] < event_date]
-    post_data = df[df['Date'] >= event_date]
-    
-    # Create contingency table for chi-square test
-    pre_industry_counts = pre_data.groupby('Customer_Industry')['Amount'].count()
-    post_industry_counts = post_data.groupby('Customer_Industry')['Amount'].count()
-    
-    # Align industries
-    all_industries = list(set(pre_industry_counts.index) | set(post_industry_counts.index))
-    pre_counts = [pre_industry_counts.get(ind, 0) for ind in all_industries]
-    post_counts = [post_industry_counts.get(ind, 0) for ind in all_industries]
-    
-    # Chi-square test
-    chi2, p_value = stats.chisquare(post_counts, pre_counts)
-    
-    return chi2, p_value, all_industries
+# --- 1. Regenerate Dummy Data (Your provided code) ---
+# Generate date ranges
+start_date = '2023-01-01'
+end_date = '2025-05-29'
+dates = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days only
 
-# 2. Industry-specific tests with seasonality control
-def test_industry_with_seasonality(df, industry, event_2024, event_2025, window=30):
-    """Test specific industry with 2024 vs 2025 comparison"""
-    
-    # Get 2024 data
-    pre_2024 = df[(df['Date'] >= event_2024 - timedelta(days=window)) & 
-                  (df['Date'] < event_2024) & 
-                  (df['Customer_Industry'] == industry)]
-    post_2024 = df[(df['Date'] >= event_2024) & 
-                   (df['Date'] <= event_2024 + timedelta(days=window)) & 
-                   (df['Customer_Industry'] == industry)]
-    
-    # Get 2025 data
-    pre_2025 = df[(df['Date'] >= event_2025 - timedelta(days=window)) & 
-                  (df['Date'] < event_2025) & 
-                  (df['Customer_Industry'] == industry)]
-    post_2025 = df[(df['Date'] >= event_2025) & 
-                   (df['Date'] <= event_2025 + timedelta(days=window)) & 
-                   (df['Customer_Industry'] == industry)]
-    
-    # Calculate changes
-    if len(pre_2024) > 0 and len(post_2024) > 0:
-        change_2024 = (post_2024['Amount'].sum() - pre_2024['Amount'].sum()) / abs(pre_2024['Amount'].sum()) * 100
-    else:
-        change_2024 = 0
-        
-    if len(pre_2025) > 0 and len(post_2025) > 0:
-        change_2025 = (post_2025['Amount'].sum() - pre_2025['Amount'].sum()) / abs(pre_2025['Amount'].sum()) * 100
-    else:
-        change_2025 = 0
-    
-    # Difference-in-differences
-    diff_in_diff = change_2025 - change_2024
-    
-    # Bootstrap test for significance
-    if len(pre_2024) > 10 and len(post_2024) > 10 and len(pre_2025) > 10 and len(post_2025) > 10:
-        # Combine all data
-        all_2024 = pd.concat([pre_2024, post_2024])
-        all_2025 = pd.concat([pre_2025, post_2025])
-        
-        # Bootstrap
-        n_bootstrap = 1000
-        bootstrap_diffs = []
-        
-        for _ in range(n_bootstrap):
-            # Resample
-            sample_2024 = all_2024.sample(n=len(all_2024), replace=True)
-            sample_2025 = all_2025.sample(n=len(all_2025), replace=True)
-            
-            # Split into pre/post
-            pre_sample_2024 = sample_2024.iloc[:len(pre_2024)]
-            post_sample_2024 = sample_2024.iloc[len(pre_2024):]
-            pre_sample_2025 = sample_2025.iloc[:len(pre_2025)]
-            post_sample_2025 = sample_2025.iloc[len(pre_2025):]
-            
-            # Calculate bootstrap diff-in-diff
-            if len(pre_sample_2024) > 0 and len(pre_sample_2025) > 0:
-                boot_change_2024 = (post_sample_2024['Amount'].sum() - pre_sample_2024['Amount'].sum()) / abs(pre_sample_2024['Amount'].sum()) * 100
-                boot_change_2025 = (post_sample_2025['Amount'].sum() - pre_sample_2025['Amount'].sum()) / abs(pre_sample_2025['Amount'].sum()) * 100
-                bootstrap_diffs.append(boot_change_2025 - boot_change_2024)
-        
-        # Calculate p-value
-        bootstrap_diffs = np.array(bootstrap_diffs)
-        p_value = np.sum(np.abs(bootstrap_diffs) >= np.abs(diff_in_diff)) / n_bootstrap
-        
-        return diff_in_diff, p_value, True
-    else:
-        return diff_in_diff, None, False
+# Key events
+tariff_date = pd.Timestamp('2025-04-02') # Your defined tariff date
+# Added a placeholder for an earlier event for potential general market shift if needed
+# For this specific analysis, we just need the tariff_date and 2024 comparison
+# trump_date = pd.Timestamp('2025-01-20') # Not directly used in this specific tariff analysis
 
-# Test overall industry distribution
-chi2, p_value, industries = test_industry_significance(df, apr_event)
-print(f"\nOverall Industry Distribution Change:")
-print(f"Chi-square statistic: {chi2:.3f}")
-print(f"P-value: {p_value:.4f}")
-print(f"Significant: {'YES' if p_value < 0.05 else 'NO'}")
+# Customer and security setup
+n_customers = 500
+customers = [f'Customer_{i:03d}' for i in range(n_customers)]
+industries = ['Technology', 'Manufacturing', 'Finance', 'Retail', 'Healthcare',
+              'Energy', 'Real Estate', 'Consumer Goods']
+security_types = ['Foreign Stocks', 'Local Stocks', 'Bonds', 'Certificate of Deposit',
+                  'Unit Trusts', 'ETFs']
 
-# Test each significant industry with seasonality control
-event_2024 = pd.Timestamp('2024-04-02')
-event_2025 = pd.Timestamp('2025-04-02')
+# Generate trades
+trades = []
+for date in dates:
+    # Adjust trading patterns based on events
+    # Simplified logic for demonstration: assume increased overall trading post-tariff slightly
+    if date >= tariff_date:
+        foreign_bias = 0.25 # Reduced foreign investment post-tariff
+        volume_multiplier = 1.3 # Increased overall trading volume post-tariff
+        bond_bias = 0.2 # Increased bond preference post-tariff
+    elif date >= pd.Timestamp('2025-01-01'): # General 2025 period before tariff
+        foreign_bias = 0.45
+        volume_multiplier = 1.1
+        bond_bias = 0.1
+    else: # 2023 and 2024
+        foreign_bias = 0.5
+        volume_multiplier = 1.0
+        bond_bias = 0.05
 
-print("\n" + "="*60)
-print("INDUSTRY-SPECIFIC TESTS WITH SEASONALITY CONTROL")
-print("="*60)
+    # Daily trades (varying by day)
+    n_trades = np.random.poisson(200 * volume_multiplier)
 
-# Get industries with significant changes
-significant_results = []
+    for _ in range(n_trades):
+        customer = np.random.choice(customers)
+        industry = np.random.choice(industries)
 
-for industry in significant_industries.index[:20]:  # Test top 20
-    diff_in_diff, p_val, tested = test_industry_with_seasonality(
-        df, industry, event_2024, event_2025
-    )
-    
-    if tested and p_val is not None:
-        significant_results.append({
-            'Industry': industry,
-            'Diff_in_Diff': diff_in_diff,
-            'P_value': p_val,
-            'Significant': p_val < 0.05,
-            'Customer_Count': significant_industries.loc[industry, 'Customer_Count']
+        # Bias security selection based on period
+        # Adjusting security probabilities for better simulation of tariff effect
+        security_probs = {
+            'Foreign Stocks': foreign_bias,
+            'Local Stocks': 0.4 - (foreign_bias - 0.25), # Local stocks might gain if foreign loses
+            'Bonds': bond_bias,
+            'Certificate of Deposit': 0.05,
+            'Unit Trusts': 0.03,
+            'ETFs': 0.02
+        }
+        # Normalize probabilities
+        sum_probs = sum(security_probs.values())
+        security_probs = {k: v / sum_probs for k, v in security_probs.items()}
+
+        security_type = np.random.choice(list(security_probs.keys()), p=list(security_probs.values()))
+
+        # Generate trade details
+        # Amount: Buy positive, Sell negative
+        if np.random.rand() < 0.55: # More buys than sells generally
+            investment_amount = np.random.lognormal(10, 1.5) * 1000 # Buy
+        else:
+            investment_amount = - (np.random.lognormal(10, 1.5) * 1000) # Sell
+
+        trades.append({
+            'Date': date,
+            'Customer_Name': customer,
+            'Customer_Industry': industry,
+            'Amount': investment_amount, # Already signed
+            'Security_Type': security_type
         })
 
-# Convert to DataFrame and sort
-results_df = pd.DataFrame(significant_results)
-results_df = results_df.sort_values('P_value')
+df = pd.DataFrame(trades)
+df['Date'] = pd.to_datetime(df['Date'])
+print(f"Total trades generated: {len(df)}")
+print(f"Data range: {df['Date'].min().date()} to {df['Date'].max().date()}\n")
+print("Sample of raw data:")
+print(df.head())
+print("-" * 50)
 
-print("\nIndustries with Statistically Significant Changes (p < 0.05):")
-print("-" * 60)
-sig_industries = results_df[results_df['Significant']]
-if len(sig_industries) > 0:
-    for _, row in sig_industries.iterrows():
-        print(f"{row['Industry']}:")
-        print(f"  Diff-in-Diff: {row['Diff_in_Diff']:.1f}%")
-        print(f"  P-value: {row['P_value']:.4f}")
-        print(f"  Customers: {row['Customer_Count']}")
-        print()
+# --- 2. Define Time Periods ---
+print("--- Defining Time Periods ---")
+tariff_date = pd.Timestamp('2025-04-02')
+pre_days = 30 # Number of trading days before tariff
+post_days = 30 # Number of trading days after tariff
+
+# Calculate actual dates for the periods
+# Find the actual n-th business day before/after
+all_business_days = pd.date_range(start='2023-01-01', end='2025-05-29', freq='B')
+
+tariff_idx = all_business_days.get_loc(tariff_date)
+
+# Get pre-tariff period for 2025
+pre_2025_start_idx = max(0, tariff_idx - pre_days)
+pre_2025_start_date = all_business_days[pre_2025_start_idx]
+pre_2025_end_date = tariff_date - pd.Timedelta(days=1) # The day before tariff
+
+# Get post-tariff period for 2025
+post_2025_end_idx = min(len(all_business_days) - 1, tariff_idx + post_days - 1)
+post_2025_end_date = all_business_days[post_2025_end_idx]
+post_2025_start_date = tariff_date # Tariff date itself
+
+# Get corresponding periods for 2024
+pre_2024_start_date = pre_2025_start_date - pd.DateOffset(years=1)
+pre_2024_end_date = pre_2025_end_date - pd.DateOffset(years=1)
+post_2024_start_date = post_2025_start_date - pd.DateOffset(years=1)
+post_2024_end_date = post_2025_end_date - pd.DateOffset(years=1)
+
+periods = {
+    'pre_2025': (pre_2025_start_date, pre_2025_end_date),
+    'post_2025': (post_2025_start_date, post_2025_end_date),
+    'pre_2024': (pre_2024_start_date, pre_2024_end_date),
+    'post_2024': (post_2024_start_date, post_2024_end_date),
+}
+
+for name, (start, end) in periods.items():
+    print(f"{name.replace('_', ' ').title()}: {start.date()} to {end.date()}")
+print("-" * 50)
+
+# --- 3. Calculate Customer-Level Net Buy for Each Period ---
+print("--- Aggregating Customer-Level Net Buy ---")
+customer_period_net_buy = []
+
+# Get all unique customers who traded in the relevant years
+relevant_customers = df[df['Date'].dt.year.isin([2024, 2025])]['Customer_Name'].unique()
+
+for customer in relevant_customers:
+    customer_data = {'Customer_Name': customer}
+    for period_name, (start_date, end_date) in periods.items():
+        net_buy = df[(df['Customer_Name'] == customer) &
+                     (df['Date'] >= start_date) &
+                     (df['Date'] <= end_date)]['Amount'].sum()
+        customer_data[f'NetBuy_{period_name}'] = net_buy
+    customer_period_net_buy.append(customer_data)
+
+customer_summary_df = pd.DataFrame(customer_period_net_buy)
+
+# Calculate changes
+customer_summary_df['Change_2025'] = customer_summary_df['NetBuy_post_2025'] - customer_summary_df['NetBuy_pre_2025']
+customer_summary_df['Change_2024'] = customer_summary_df['NetBuy_post_2024'] - customer_summary_df['NetBuy_pre_2024']
+
+# Filter out customers with no activity in either year's relevant periods to focus on 'active' ones
+# For a more inclusive approach, we'll keep all relevant_customers and their 0 net buys
+# However, if you want to focus on 'changers', you might filter. For robustness, keep all.
+print("Sample of Customer Summary Data:")
+print(customer_summary_df.head())
+print("-" * 50)
+
+# --- 4. Overall Net Buy Change (Difference-in-Differences) ---
+print("--- 4. Overall Net Buy Change (Difference-in-Differences) ---")
+
+# Method 1: Simple t-test on the difference in changes
+t_stat, p_value = stats.ttest_ind(customer_summary_df['Change_2025'], customer_summary_df['Change_2024'], equal_var=False) # Welch's t-test
+
+print(f"DiD (2025 Change - 2024 Change) - Mean difference: {customer_summary_df['Change_2025'].mean() - customer_summary_df['Change_2024'].mean():,.2f}")
+print(f"T-statistic (comparing 'Change_2025' vs 'Change_2024'): {t_stat:.3f}")
+print(f"P-value: {p_value:.4f}")
+
+if p_value < 0.05:
+    print("Conclusion: The change in net buy in 2025 (post-tariff) is significantly different from the change in 2024 (seasonal control).")
 else:
-    print("NO INDUSTRIES SHOWED STATISTICALLY SIGNIFICANT CHANGES AFTER CONTROLLING FOR SEASONALITY")
+    print("Conclusion: No statistically significant difference in net buy change between 2025 and 2024, suggesting the observed change might be due to normal seasonality.")
 
-print("\nTop 10 Industries by P-value:")
-print(results_df[['Industry', 'Diff_in_Diff', 'P_value', 'Significant']].head(10))
+# Method 2: Regression-based DiD (More robust and standard)
+print("\n--- Regression-based DiD for Overall Net Buy ---")
 
-# Create visualization
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+# Reshape data for regression: each customer-period combination is a row
+df_reg = customer_summary_df[['Customer_Name', 'NetBuy_pre_2024', 'NetBuy_post_2024', 'NetBuy_pre_2025', 'NetBuy_post_2025']].copy()
+df_reg = df_reg.melt(id_vars=['Customer_Name'], var_name='Period', value_name='NetBuy')
 
-# Plot 1: P-values by industry
-industries_to_plot = results_df.head(15)
-y_pos = np.arange(len(industries_to_plot))
+# Create indicator variables
+df_reg['Year_2025'] = df_reg['Period'].apply(lambda x: 1 if '2025' in x else 0)
+df_reg['Post_Tariff'] = df_reg['Period'].apply(lambda x: 1 if 'post' in x else 0)
+df_reg['Interaction'] = df_reg['Year_2025'] * df_reg['Post_Tariff']
 
-colors = ['red' if p < 0.05 else 'gray' for p in industries_to_plot['P_value']]
-bars = ax1.barh(y_pos, industries_to_plot['P_value'], color=colors, alpha=0.7)
+# Run OLS regression
+# Fixed effects for Customer_Name is implicitly handled by not including it in the formula if we assume fixed effects.
+# A true fixed-effects model would look like: smf.ols("NetBuy ~ Post_Tariff * Year_2025 + C(Customer_Name)", data=df_reg).fit()
+# But for simplicity and for the specific DiD coefficient, this formula is common.
+# If you have few customers, fixed effects can consume many degrees of freedom.
+model = smf.ols("NetBuy ~ Post_Tariff + Year_2025 + Interaction", data=df_reg)
+results = model.fit()
 
-ax1.axvline(x=0.05, color='red', linestyle='--', label='Significance threshold')
-ax1.set_yticks(y_pos)
-ax1.set_yticklabels(industries_to_plot['Industry'])
-ax1.set_xlabel('P-value')
-ax1.set_title('Statistical Significance of Industry Changes (with Seasonality Control)')
-ax1.legend()
-ax1.set_xlim(0, 1)
+print(results.summary().tables[1]) # Print the coefficients table
 
-# Plot 2: Effect sizes for significant industries
-if len(sig_industries) > 0:
-    sig_y_pos = np.arange(len(sig_industries))
-    colors = ['green' if d > 0 else 'red' for d in sig_industries['Diff_in_Diff']]
-    
-    ax2.barh(sig_y_pos, sig_industries['Diff_in_Diff'], color=colors, alpha=0.7)
-    ax2.set_yticks(sig_y_pos)
-    ax2.set_yticklabels(sig_industries['Industry'])
-    ax2.set_xlabel('Difference-in-Differences (%)')
-    ax2.set_title('Effect Size for Statistically Significant Industries')
-    ax2.axvline(x=0, color='black', linestyle='-', alpha=0.3)
+# The 'Interaction' coefficient is your DiD estimator
+did_coeff = results.params['Interaction']
+did_pvalue = results.pvalues['Interaction']
+
+print(f"\nDiD Coefficient (Interaction term): {did_coeff:.3f}")
+print(f"P-value for DiD Coefficient: {did_pvalue:.4f}")
+
+if did_pvalue < 0.05:
+    print("Conclusion: The tariff had a statistically significant impact on customer net buy, beyond normal seasonal trends.")
 else:
-    ax2.text(0.5, 0.5, 'No Statistically Significant Industries Found', 
-             ha='center', va='center', transform=ax2.transAxes, fontsize=16)
-    ax2.set_xticks([])
-    ax2.set_yticks([])
+    print("Conclusion: The tariff did not have a statistically significant impact on customer net buy beyond normal seasonal trends.")
+print("-" * 50)
 
-plt.tight_layout()
-plt.savefig('industry_statistical_significance.png', dpi=300, bbox_inches='tight')
-plt.close()
+# --- 5. Net Buy Change by Security Type (DiD for each type) ---
+print("--- 5. Net Buy Change by Security Type ---")
 
-# Summary
-print("\n" + "="*60)
-print("SUMMARY OF INDUSTRY IMPACT SIGNIFICANCE")
-print("="*60)
-print(f"Total industries tested: {len(results_df)}")
-print(f"Statistically significant (p<0.05): {len(sig_industries)}")
-print(f"Percentage significant: {len(sig_industries)/len(results_df)*100:.1f}%")
+security_type_results = []
 
-if len(sig_industries) > 0:
-    print(f"\nMost significant industry: {sig_industries.iloc[0]['Industry']}")
-    print(f"  Effect size: {sig_industries.iloc[0]['Diff_in_Diff']:.1f}%")
-    print(f"  P-value: {sig_industries.iloc[0]['P_value']:.4f}")
+for sec_type in security_types:
+    # Calculate customer-level net buy for this security type
+    customer_sec_net_buy = []
+    for customer in relevant_customers:
+        customer_data = {'Customer_Name': customer}
+        for period_name, (start_date, end_date) in periods.items():
+            net_buy = df[(df['Customer_Name'] == customer) &
+                         (df['Security_Type'] == sec_type) &
+                         (df['Date'] >= start_date) &
+                         (df['Date'] <= end_date)]['Amount'].sum()
+            customer_data[f'NetBuy_{period_name}'] = net_buy
+        customer_sec_net_buy.append(customer_data)
+
+    sec_df = pd.DataFrame(customer_sec_net_buy)
+    sec_df['Change_2025'] = sec_df['NetBuy_post_2025'] - sec_df['NetBuy_pre_2025']
+    sec_df['Change_2024'] = sec_df['NetBuy_post_2024'] - sec_df['NetBuy_pre_2024']
+
+    # Filter out customers who had no activity for this security type in either 2024 or 2025 periods
+    # To avoid division by zero or inflated sample size for specific security types if they never trade them.
+    # We still keep customers with 0 change to ensure they are part of the sample.
+    active_sec_customers = sec_df[(sec_df['NetBuy_pre_2024'] != 0) | (sec_df['NetBuy_post_2024'] != 0) |
+                                  (sec_df['NetBuy_pre_2025'] != 0) | (sec_df['NetBuy_post_2025'] != 0)]
 
 
-=============ㅌㅌㅌㅌ===========
-
-# 5. Industry Impact Analysis with Enhanced Visualizations
-print("\n5. INDUSTRY IMPACT ANALYSIS")
-print("-" * 40)
-
-# Calculate industry impact
-industry_customers = df.groupby('Customer_Industry')['Customer_Name'].nunique()
-industry_impact = df[df['Period'].isin(['Pre-April', 'Post-April'])].groupby(['Customer_Industry', 'Period'])['Amount'].sum().unstack(fill_value=0)
-
-# Add customer count
-industry_impact['Customer_Count'] = industry_customers
-industry_impact['Change_%'] = 0  # Initialize
-
-# Calculate change only if both periods exist
-if 'Pre-April' in industry_impact.columns and 'Post-April' in industry_impact.columns:
-    mask = industry_impact['Pre-April'] != 0
-    industry_impact.loc[mask, 'Change_%'] = (
-        (industry_impact.loc[mask, 'Post-April'] - industry_impact.loc[mask, 'Pre-April']) / 
-        industry_impact.loc[mask, 'Pre-April'].abs() * 100
-    ).round(2)
-
-# Filter industries with at least 10 customers
-significant_industries = industry_impact[industry_impact['Customer_Count'] >= 10]
-industry_ranking = significant_industries.sort_values('Change_%', ascending=False)
-
-# Create comprehensive industry impact visualization
-fig = plt.figure(figsize=(20, 12))
-gs = fig.add_gridspec(3, 2, height_ratios=[2, 1.5, 1], hspace=0.3, wspace=0.3)
-
-# 1. Main Industry Impact Bar Chart (Top)
-ax1 = fig.add_subplot(gs[0, :])
-
-# Get top 10 increasers and decreasers
-top_increasers = industry_ranking.head(10)
-top_decreasers = industry_ranking.tail(10)
-combined_industries = pd.concat([top_increasers, top_decreasers])
-
-# Create color map
-colors = []
-for val in combined_industries['Change_%']:
-    if val > 50:
-        colors.append('#2E7D32')  # Dark green
-    elif val > 0:
-        colors.append('#66BB6A')  # Light green
-    elif val > -50:
-        colors.append('#EF5350')  # Light red
+    if len(active_sec_customers) > 1: # Need at least two data points for t-test
+        t_stat, p_value = stats.ttest_ind(active_sec_customers['Change_2025'], active_sec_customers['Change_2024'], equal_var=False)
+        did_effect = active_sec_customers['Change_2025'].mean() - active_sec_customers['Change_2024'].mean()
+        security_type_results.append({
+            'Security_Type': sec_type,
+            'DiD_Effect_Mean': did_effect,
+            'T_Statistic': t_stat,
+            'P_Value': p_value
+        })
     else:
-        colors.append('#C62828')  # Dark red
+        security_type_results.append({
+            'Security_Type': sec_type,
+            'DiD_Effect_Mean': 0,
+            'T_Statistic': np.nan,
+            'P_Value': np.nan
+        })
 
-# Create horizontal bar chart
-y_pos = np.arange(len(combined_industries))
-bars = ax1.barh(y_pos, combined_industries['Change_%'], color=colors, alpha=0.8)
+sec_results_df = pd.DataFrame(security_type_results)
+print(sec_results_df.round(4))
 
-# Add value labels
-for i, (bar, count) in enumerate(zip(bars, combined_industries['Customer_Count'])):
-    width = bar.get_width()
-    label_x_pos = width + 5 if width > 0 else width - 5
-    ax1.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
-             f'{width:.1f}%', ha='left' if width > 0 else 'right', 
-             va='center', fontsize=10, fontweight='bold')
-    # Add customer count
-    ax1.text(5 if width > 0 else -5, bar.get_y() + bar.get_height()/2, 
-             f'({count} customers)', ha='left' if width > 0 else 'right', 
-             va='center', fontsize=8, alpha=0.7)
+print("\nInterpretation for Security Types:")
+for index, row in sec_results_df.iterrows():
+    if row['P_Value'] < 0.05:
+        print(f"  - {row['Security_Type']}: Significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). This indicates a change in net buy for this security type beyond seasonal trends.")
+    elif pd.isna(row['P_Value']):
+        print(f"  - {row['Security_Type']}: Insufficient data for robust analysis.")
+    else:
+        print(f"  - {row['Security_Type']}: No significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). Change likely due to seasonality.")
+print("-" * 50)
 
-ax1.set_yticks(y_pos)
-ax1.set_yticklabels(combined_industries.index, fontsize=11)
-ax1.set_xlabel('Percentage Change (%)', fontsize=12, fontweight='bold')
-ax1.set_title('Industry Impact: Top Winners and Losers', fontsize=16, fontweight='bold', pad=20)
-ax1.axvline(x=0, color='black', linestyle='-', alpha=0.3, linewidth=1)
-ax1.grid(True, axis='x', alpha=0.3)
-ax1.set_xlim(-500, 200)
+# --- 6. Industry Impact (DiD for each industry) ---
+print("--- 6. Industry Impact ---")
 
-# Add background shading
-ax1.axvspan(-500, 0, alpha=0.05, color='red')
-ax1.axvspan(0, 200, alpha=0.05, color='green')
+industry_results = []
 
-# 2. Industry Volume Comparison (Bottom Left)
-ax2 = fig.add_subplot(gs[1, 0])
+for industry in industries:
+    # Get customers belonging to this industry
+    industry_customers = df[df['Customer_Industry'] == industry]['Customer_Name'].unique()
 
-# Select top 10 by total volume
-top_volume_industries = industry_impact.nlargest(10, 'Customer_Count')
-x = np.arange(len(top_volume_industries))
-width = 0.35
+    # Filter the already summarized customer_summary_df for these customers
+    industry_summary_df = customer_summary_df[customer_summary_df['Customer_Name'].isin(industry_customers)].copy()
 
-pre_volumes = top_volume_industries['Pre-April'] / 1e6
-post_volumes = top_volume_industries['Post-April'] / 1e6
+    # Filter out customers with no activity in either year's relevant periods for this industry
+    active_ind_customers = industry_summary_df[(industry_summary_df['NetBuy_pre_2024'] != 0) | (industry_summary_df['NetBuy_post_2024'] != 0) |
+                                               (industry_summary_df['NetBuy_pre_2025'] != 0) | (industry_summary_df['NetBuy_post_2025'] != 0)]
 
-bars1 = ax2.bar(x - width/2, pre_volumes, width, label='Pre-April', color='#90CAF9', alpha=0.8)
-bars2 = ax2.bar(x + width/2, post_volumes, width, label='Post-April', color='#1976D2', alpha=0.8)
 
-ax2.set_xlabel('Industry', fontsize=11, fontweight='bold')
-ax2.set_ylabel('Trading Volume (Million $)', fontsize=11, fontweight='bold')
-ax2.set_title('Trading Volume by Industry', fontsize=13, fontweight='bold')
-ax2.set_xticks(x)
-ax2.set_xticklabels(top_volume_industries.index, rotation=45, ha='right')
-ax2.legend()
-ax2.grid(True, axis='y', alpha=0.3)
+    if len(active_ind_customers) > 1: # Need at least two data points for t-test
+        t_stat, p_value = stats.ttest_ind(active_ind_customers['Change_2025'], active_ind_customers['Change_2024'], equal_var=False)
+        did_effect = active_ind_customers['Change_2025'].mean() - active_ind_customers['Change_2024'].mean()
+        industry_results.append({
+            'Industry': industry,
+            'DiD_Effect_Mean': did_effect,
+            'T_Statistic': t_stat,
+            'P_Value': p_value
+        })
+    else:
+        industry_results.append({
+            'Industry': industry,
+            'DiD_Effect_Mean': 0,
+            'T_Statistic': np.nan,
+            'P_Value': np.nan
+        })
 
-# Add value labels on bars
-def autolabel(ax, bars):
-    for bar in bars:
-        height = bar.get_height()
-        if height > 0:
-            ax.annotate(f'{height:.0f}',
-                       xy=(bar.get_x() + bar.get_width() / 2, height),
-                       xytext=(0, 3),
-                       textcoords="offset points",
-                       ha='center', va='bottom', fontsize=8)
+ind_results_df = pd.DataFrame(industry_results)
+print(ind_results_df.round(4))
 
-autolabel(ax2, bars1)
-autolabel(ax2, bars2)
+print("\nInterpretation for Industries:")
+for index, row in ind_results_df.iterrows():
+    if row['P_Value'] < 0.05:
+        print(f"  - {row['Industry']}: Significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). This indicates a change in net buy for this industry beyond seasonal trends.")
+    elif pd.isna(row['P_Value']):
+        print(f"  - {row['Industry']}: Insufficient data for robust analysis.")
+    else:
+        print(f"  - {row['Industry']}: No significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). Change likely due to seasonality.")
+print("-" * 50)
 
-# 3. Impact Distribution (Bottom Right)
-ax3 = fig.add_subplot(gs[1, 1])
-
-# Create histogram of changes
-change_data = industry_ranking['Change_%'].values
-bins = [-500, -200, -100, -50, 0, 50, 100, 200]
-counts, _ = np.histogram(change_data, bins=bins)
-
-colors_hist = ['#C62828', '#EF5350', '#FFCDD2', '#C8E6C9', '#66BB6A', '#2E7D32']
-ax3.bar(range(len(counts)), counts, color=colors_hist[:len(counts)], alpha=0.8)
-ax3.set_xticks(range(len(counts)))
-ax3.set_xticklabels([f'{bins[i]} to {bins[i+1]}%' for i in range(len(counts))], rotation=45, ha='right')
-ax3.set_ylabel('Number of Industries', fontsize=11, fontweight='bold')
-ax3.set_title('Distribution of Industry Changes', fontsize=13, fontweight='bold')
-ax3.grid(True, axis='y', alpha=0.3)
-
-# Add count labels
-for i, count in enumerate(counts):
-    if count > 0:
-        ax3.text(i, count + 0.1, str(count), ha='center', va='bottom', fontsize=10, fontweight='bold')
-
-# 4. Summary Statistics Box (Bottom)
-ax4 = fig.add_subplot(gs[2, :])
-ax4.axis('off')
-
-# Calculate summary statistics
-total_industries = len(significant_industries)
-positive_change = len(significant_industries[significant_industries['Change_%'] > 0])
-negative_change = len(significant_industries[significant_industries['Change_%'] < 0])
-avg_change = significant_industries['Change_%'].mean()
-median_change = significant_industries['Change_%'].median()
-
-# Create summary text
-summary_text = f"""
-Summary Statistics (Industries with 10+ customers):
-- Total Industries Analyzed: {total_industries}
-- Industries with Positive Change: {positive_change} ({positive_change/total_industries*100:.1f}%)
-- Industries with Negative Change: {negative_change} ({negative_change/total_industries*100:.1f}%)
-- Average Change: {avg_change:.1f}%
-- Median Change: {median_change:.1f}%
-- Largest Increase: {industry_ranking.iloc[0]['Change_%']:.1f}% ({industry_ranking.index[0]})
-- Largest Decrease: {industry_ranking.iloc[-1]['Change_%']:.1f}% ({industry_ranking.index[-1]})
-"""
-
-ax4.text(0.5, 0.5, summary_text, transform=ax4.transAxes, 
-         fontsize=12, verticalalignment='center', horizontalalignment='center',
-         bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.2))
-
-plt.suptitle('Industry Impact Analysis - April 2, 2025 Tariff Event', fontsize=18, fontweight='bold', y=0.98)
-plt.savefig('april_industry_impact_comprehensive.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# Create a simple heatmap for top industries
-fig, ax = plt.subplots(figsize=(12, 8))
-
-# Get top 15 industries by absolute change
-top_impact_industries = industry_ranking.reindex(
-    industry_ranking['Change_%'].abs().nlargest(15).index
-).sort_values('Change_%', ascending=True)
-
-# Create color gradient
-colors = plt.cm.RdYlGn(np.linspace(0, 1, len(top_impact_industries)))
-change_normalized = (top_impact_industries['Change_%'] - top_impact_industries['Change_%'].min()) / \
-                   (top_impact_industries['Change_%'].max() - top_impact_industries['Change_%'].min())
-
-bars = ax.barh(range(len(top_impact_industries)), top_impact_industries['Change_%'], 
-               color=plt.cm.RdYlGn(change_normalized))
-
-# Add value labels
-for i, (idx, row) in enumerate(top_impact_industries.iterrows()):
-    change = row['Change_%']
-    customers = row['Customer_Count']
-    
-    # Change percentage label
-    label_x = change + 10 if change > 0 else change - 10
-    ax.text(label_x, i, f'{change:.1f}%', 
-            ha='left' if change > 0 else 'right', va='center', 
-            fontsize=11, fontweight='bold')
-    
-    # Customer count label
-    ax.text(5 if change > 0 else -5, i, f'{customers} customers', 
-            ha='left' if change > 0 else 'right', va='center', 
-            fontsize=9, alpha=0.7, style='italic')
-
-ax.set_yticks(range(len(top_impact_industries)))
-ax.set_yticklabels(top_impact_industries.index, fontsize=11)
-ax.set_xlabel('Percentage Change (%)', fontsize=12, fontweight='bold')
-ax.set_title('Top 15 Industries by Impact Magnitude', fontsize=16, fontweight='bold', pad=20)
-ax.axvline(x=0, color='black', linestyle='-', alpha=0.5, linewidth=2)
-ax.grid(True, axis='x', alpha=0.3)
-
-# Add gradient legend
-sm = plt.cm.ScalarMappable(cmap=plt.cm.RdYlGn, 
-                           norm=plt.Normalize(vmin=top_impact_industries['Change_%'].min(), 
-                                            vmax=top_impact_industries['Change_%'].max()))
-sm.set_array([])
-cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', pad=0.05, shrink=0.5)
-cbar.set_label('Impact Scale', fontsize=10)
-
-plt.tight_layout()
-plt.savefig('april_industry_heatmap.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# Print results
-print("\nIndustry Impact Ranking (Industries with 10+ customers):")
-print("\nTop 10 Increasers:")
-print(industry_ranking[['Change_%', 'Customer_Count']].head(10))
-print("\nTop 10 Decreasers:")
-print(industry_ranking[['Change_%', 'Customer_Count']].tail(10))
-
-print("\nVisualization files created:")
-print("- april_industry_impact_comprehensive.png (Full analysis)")
-print("- april_industry_heatmap.png (Top 15 impact visualization)")
+print("\n--- Analysis Complete ---")
+print("Remember to critically interpret these statistical results in the context of business significance and potential confounding factors for your presentation.")
