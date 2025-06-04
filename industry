@@ -1,315 +1,182 @@
+import time
 import pandas as pd
-import numpy as np
-from scipy import stats
-import statsmodels.formula.api as smf # For regression-based DiD
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-# --- 1. Regenerate Dummy Data (Your provided code) ---
-# Generate date ranges
-start_date = '2023-01-01'
-end_date = '2025-05-29'
-dates = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days only
-
-# Key events
-tariff_date = pd.Timestamp('2025-04-02') # Your defined tariff date
-# Added a placeholder for an earlier event for potential general market shift if needed
-# For this specific analysis, we just need the tariff_date and 2024 comparison
-# trump_date = pd.Timestamp('2025-01-20') # Not directly used in this specific tariff analysis
-
-# Customer and security setup
-n_customers = 500
-customers = [f'Customer_{i:03d}' for i in range(n_customers)]
-industries = ['Technology', 'Manufacturing', 'Finance', 'Retail', 'Healthcare',
-              'Energy', 'Real Estate', 'Consumer Goods']
-security_types = ['Foreign Stocks', 'Local Stocks', 'Bonds', 'Certificate of Deposit',
-                  'Unit Trusts', 'ETFs']
-
-# Generate trades
-trades = []
-for date in dates:
-    # Adjust trading patterns based on events
-    # Simplified logic for demonstration: assume increased overall trading post-tariff slightly
-    if date >= tariff_date:
-        foreign_bias = 0.25 # Reduced foreign investment post-tariff
-        volume_multiplier = 1.3 # Increased overall trading volume post-tariff
-        bond_bias = 0.2 # Increased bond preference post-tariff
-    elif date >= pd.Timestamp('2025-01-01'): # General 2025 period before tariff
-        foreign_bias = 0.45
-        volume_multiplier = 1.1
-        bond_bias = 0.1
-    else: # 2023 and 2024
-        foreign_bias = 0.5
-        volume_multiplier = 1.0
-        bond_bias = 0.05
-
-    # Daily trades (varying by day)
-    n_trades = np.random.poisson(200 * volume_multiplier)
-
-    for _ in range(n_trades):
-        customer = np.random.choice(customers)
-        industry = np.random.choice(industries)
-
-        # Bias security selection based on period
-        # Adjusting security probabilities for better simulation of tariff effect
-        security_probs = {
-            'Foreign Stocks': foreign_bias,
-            'Local Stocks': 0.4 - (foreign_bias - 0.25), # Local stocks might gain if foreign loses
-            'Bonds': bond_bias,
-            'Certificate of Deposit': 0.05,
-            'Unit Trusts': 0.03,
-            'ETFs': 0.02
-        }
-        # Normalize probabilities
-        sum_probs = sum(security_probs.values())
-        security_probs = {k: v / sum_probs for k, v in security_probs.items()}
-
-        security_type = np.random.choice(list(security_probs.keys()), p=list(security_probs.values()))
-
-        # Generate trade details
-        # Amount: Buy positive, Sell negative
-        if np.random.rand() < 0.55: # More buys than sells generally
-            investment_amount = np.random.lognormal(10, 1.5) * 1000 # Buy
+def scrape_centanet_property(url):
+    # Initialize Chrome driver
+    driver = webdriver.Chrome()
+    
+    try:
+        # Load the page
+        print(f"Loading page: {url}")
+        driver.get(url)
+        
+        # Wait for page to load
+        wait = WebDriverWait(driver, 20)
+        
+        # Wait for the table to be present
+        time.sleep(3)  # Initial wait for page to render
+        
+        # Find and click "1個月內" button
+        print("Looking for '1個月內' button...")
+        try:
+            # Try multiple possible selectors for the button
+            one_month_button = None
+            
+            # Method 1: Look for button by text
+            buttons = driver.find_elements(By.TAG_NAME, "button")
+            for button in buttons:
+                if "1個月內" in button.text:
+                    one_month_button = button
+                    break
+            
+            # Method 2: Look for span/div containing the text
+            if not one_month_button:
+                elements = driver.find_elements(By.XPATH, "//*[contains(text(), '1個月內')]")
+                if elements:
+                    one_month_button = elements[0]
+            
+            if one_month_button:
+                print("Found '1個月內' button, clicking...")
+                driver.execute_script("arguments[0].scrollIntoView(true);", one_month_button)
+                time.sleep(1)
+                driver.execute_script("arguments[0].click();", one_month_button)
+                time.sleep(3)  # Wait for the update to apply
+            else:
+                print("Warning: Could not find '1個月內' button")
+        
+        except Exception as e:
+            print(f"Error clicking '1個月內' button: {e}")
+        
+        # Get all rows before clicking to store original state
+        print("Extracting table data...")
+        
+        # Find the main table container
+        table_data = []
+        
+        # Try to find table rows - adjust selectors based on actual HTML structure
+        rows = driver.find_elements(By.CSS_SELECTOR, "tr, [role='row'], .table-row")
+        
+        if not rows:
+            # Alternative: look for divs that might contain row data
+            rows = driver.find_elements(By.CSS_SELECTOR, "div[class*='row'], div[class*='item']")
+        
+        print(f"Found {len(rows)} rows")
+        
+        # Extract data from each row
+        for i, row in enumerate(rows):
+            try:
+                # Get all cells in the row
+                cells = row.find_elements(By.CSS_SELECTOR, "td, [role='cell'], div[class*='cell'], span[class*='cell']")
+                
+                if not cells:
+                    continue
+                
+                # Extract text from each cell
+                row_data = [cell.text.strip() for cell in cells if cell.text.strip()]
+                
+                if row_data:  # Only add non-empty rows
+                    # Check if this row has been updated (usually indicated by a special class or style)
+                    is_updated = False
+                    
+                    # Check for color changes or special classes that indicate updates
+                    row_classes = row.get_attribute("class") or ""
+                    row_style = row.get_attribute("style") or ""
+                    
+                    # Common indicators of updates
+                    if any(indicator in row_classes.lower() for indicator in ["updated", "highlight", "active", "selected"]):
+                        is_updated = True
+                    elif any(color in row_style.lower() for color in ["background", "color", "rgb"]):
+                        is_updated = True
+                    
+                    # Also check cells for highlighting
+                    for cell in cells:
+                        cell_classes = cell.get_attribute("class") or ""
+                        cell_style = cell.get_attribute("style") or ""
+                        if any(indicator in cell_classes.lower() for indicator in ["updated", "highlight", "active"]):
+                            is_updated = True
+                            break
+                        if any(color in cell_style.lower() for color in ["background", "color"]):
+                            is_updated = True
+                            break
+                    
+                    # Add update status to row data
+                    row_data.append("Yes" if is_updated else "No")
+                    table_data.append(row_data)
+                    
+            except Exception as e:
+                print(f"Error processing row {i}: {e}")
+                continue
+        
+        # If no data found with first method, try alternative extraction
+        if not table_data:
+            print("Trying alternative extraction method...")
+            # Look for any tabular data structure
+            elements = driver.find_elements(By.XPATH, "//*[contains(@class, 'table') or contains(@class, 'grid') or contains(@class, 'list')]//descendant::*[text()]")
+            
+            current_row = []
+            for elem in elements:
+                text = elem.text.strip()
+                if text:
+                    current_row.append(text)
+                    # Assume new row every 5-7 elements (adjust based on actual structure)
+                    if len(current_row) >= 5:
+                        current_row.append("No")  # Default update status
+                        table_data.append(current_row)
+                        current_row = []
+        
+        # Create DataFrame
+        if table_data:
+            # Estimate number of columns based on most common row length
+            col_counts = {}
+            for row in table_data:
+                length = len(row)
+                col_counts[length] = col_counts.get(length, 0) + 1
+            
+            most_common_length = max(col_counts, key=col_counts.get)
+            
+            # Filter rows to have consistent column count
+            filtered_data = [row for row in table_data if len(row) == most_common_length]
+            
+            # Create column names
+            columns = [f"Column_{i+1}" for i in range(most_common_length - 1)]
+            columns.append("Updated_Within_1_Month")
+            
+            # Common column names for property data
+            if most_common_length >= 5:
+                columns[0] = "Floor/Unit"
+                columns[1] = "Area_sqft"
+                columns[2] = "Price"
+                if most_common_length > 5:
+                    columns[3] = "Price_per_sqft"
+            
+            df = pd.DataFrame(filtered_data, columns=columns)
+            
+            # Save to CSV
+            output_file = "centanet_property_data.csv"
+            df.to_csv(output_file, index=False, encoding='utf-8-sig')
+            print(f"\nData saved to {output_file}")
+            print(f"Total rows extracted: {len(df)}")
+            print("\nFirst few rows:")
+            print(df.head())
+            
         else:
-            investment_amount = - (np.random.lognormal(10, 1.5) * 1000) # Sell
+            print("No data could be extracted from the page")
+    
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    
+    finally:
+        # Close the browser
+        driver.quit()
 
-        trades.append({
-            'Date': date,
-            'Customer_Name': customer,
-            'Customer_Industry': industry,
-            'Amount': investment_amount, # Already signed
-            'Security_Type': security_type
-        })
-
-df = pd.DataFrame(trades)
-df['Date'] = pd.to_datetime(df['Date'])
-print(f"Total trades generated: {len(df)}")
-print(f"Data range: {df['Date'].min().date()} to {df['Date'].max().date()}\n")
-print("Sample of raw data:")
-print(df.head())
-print("-" * 50)
-
-# --- 2. Define Time Periods ---
-print("--- Defining Time Periods ---")
-tariff_date = pd.Timestamp('2025-04-02')
-pre_days = 30 # Number of trading days before tariff
-post_days = 30 # Number of trading days after tariff
-
-# Calculate actual dates for the periods
-# Find the actual n-th business day before/after
-all_business_days = pd.date_range(start='2023-01-01', end='2025-05-29', freq='B')
-
-tariff_idx = all_business_days.get_loc(tariff_date)
-
-# Get pre-tariff period for 2025
-pre_2025_start_idx = max(0, tariff_idx - pre_days)
-pre_2025_start_date = all_business_days[pre_2025_start_idx]
-pre_2025_end_date = tariff_date - pd.Timedelta(days=1) # The day before tariff
-
-# Get post-tariff period for 2025
-post_2025_end_idx = min(len(all_business_days) - 1, tariff_idx + post_days - 1)
-post_2025_end_date = all_business_days[post_2025_end_idx]
-post_2025_start_date = tariff_date # Tariff date itself
-
-# Get corresponding periods for 2024
-pre_2024_start_date = pre_2025_start_date - pd.DateOffset(years=1)
-pre_2024_end_date = pre_2025_end_date - pd.DateOffset(years=1)
-post_2024_start_date = post_2025_start_date - pd.DateOffset(years=1)
-post_2024_end_date = post_2025_end_date - pd.DateOffset(years=1)
-
-periods = {
-    'pre_2025': (pre_2025_start_date, pre_2025_end_date),
-    'post_2025': (post_2025_start_date, post_2025_end_date),
-    'pre_2024': (pre_2024_start_date, pre_2024_end_date),
-    'post_2024': (post_2024_start_date, post_2024_end_date),
-}
-
-for name, (start, end) in periods.items():
-    print(f"{name.replace('_', ' ').title()}: {start.date()} to {end.date()}")
-print("-" * 50)
-
-# --- 3. Calculate Customer-Level Net Buy for Each Period ---
-print("--- Aggregating Customer-Level Net Buy ---")
-customer_period_net_buy = []
-
-# Get all unique customers who traded in the relevant years
-relevant_customers = df[df['Date'].dt.year.isin([2024, 2025])]['Customer_Name'].unique()
-
-for customer in relevant_customers:
-    customer_data = {'Customer_Name': customer}
-    for period_name, (start_date, end_date) in periods.items():
-        net_buy = df[(df['Customer_Name'] == customer) &
-                     (df['Date'] >= start_date) &
-                     (df['Date'] <= end_date)]['Amount'].sum()
-        customer_data[f'NetBuy_{period_name}'] = net_buy
-    customer_period_net_buy.append(customer_data)
-
-customer_summary_df = pd.DataFrame(customer_period_net_buy)
-
-# Calculate changes
-customer_summary_df['Change_2025'] = customer_summary_df['NetBuy_post_2025'] - customer_summary_df['NetBuy_pre_2025']
-customer_summary_df['Change_2024'] = customer_summary_df['NetBuy_post_2024'] - customer_summary_df['NetBuy_pre_2024']
-
-# Filter out customers with no activity in either year's relevant periods to focus on 'active' ones
-# For a more inclusive approach, we'll keep all relevant_customers and their 0 net buys
-# However, if you want to focus on 'changers', you might filter. For robustness, keep all.
-print("Sample of Customer Summary Data:")
-print(customer_summary_df.head())
-print("-" * 50)
-
-# --- 4. Overall Net Buy Change (Difference-in-Differences) ---
-print("--- 4. Overall Net Buy Change (Difference-in-Differences) ---")
-
-# Method 1: Simple t-test on the difference in changes
-t_stat, p_value = stats.ttest_ind(customer_summary_df['Change_2025'], customer_summary_df['Change_2024'], equal_var=False) # Welch's t-test
-
-print(f"DiD (2025 Change - 2024 Change) - Mean difference: {customer_summary_df['Change_2025'].mean() - customer_summary_df['Change_2024'].mean():,.2f}")
-print(f"T-statistic (comparing 'Change_2025' vs 'Change_2024'): {t_stat:.3f}")
-print(f"P-value: {p_value:.4f}")
-
-if p_value < 0.05:
-    print("Conclusion: The change in net buy in 2025 (post-tariff) is significantly different from the change in 2024 (seasonal control).")
-else:
-    print("Conclusion: No statistically significant difference in net buy change between 2025 and 2024, suggesting the observed change might be due to normal seasonality.")
-
-# Method 2: Regression-based DiD (More robust and standard)
-print("\n--- Regression-based DiD for Overall Net Buy ---")
-
-# Reshape data for regression: each customer-period combination is a row
-df_reg = customer_summary_df[['Customer_Name', 'NetBuy_pre_2024', 'NetBuy_post_2024', 'NetBuy_pre_2025', 'NetBuy_post_2025']].copy()
-df_reg = df_reg.melt(id_vars=['Customer_Name'], var_name='Period', value_name='NetBuy')
-
-# Create indicator variables
-df_reg['Year_2025'] = df_reg['Period'].apply(lambda x: 1 if '2025' in x else 0)
-df_reg['Post_Tariff'] = df_reg['Period'].apply(lambda x: 1 if 'post' in x else 0)
-df_reg['Interaction'] = df_reg['Year_2025'] * df_reg['Post_Tariff']
-
-# Run OLS regression
-# Fixed effects for Customer_Name is implicitly handled by not including it in the formula if we assume fixed effects.
-# A true fixed-effects model would look like: smf.ols("NetBuy ~ Post_Tariff * Year_2025 + C(Customer_Name)", data=df_reg).fit()
-# But for simplicity and for the specific DiD coefficient, this formula is common.
-# If you have few customers, fixed effects can consume many degrees of freedom.
-model = smf.ols("NetBuy ~ Post_Tariff + Year_2025 + Interaction", data=df_reg)
-results = model.fit()
-
-print(results.summary().tables[1]) # Print the coefficients table
-
-# The 'Interaction' coefficient is your DiD estimator
-did_coeff = results.params['Interaction']
-did_pvalue = results.pvalues['Interaction']
-
-print(f"\nDiD Coefficient (Interaction term): {did_coeff:.3f}")
-print(f"P-value for DiD Coefficient: {did_pvalue:.4f}")
-
-if did_pvalue < 0.05:
-    print("Conclusion: The tariff had a statistically significant impact on customer net buy, beyond normal seasonal trends.")
-else:
-    print("Conclusion: The tariff did not have a statistically significant impact on customer net buy beyond normal seasonal trends.")
-print("-" * 50)
-
-# --- 5. Net Buy Change by Security Type (DiD for each type) ---
-print("--- 5. Net Buy Change by Security Type ---")
-
-security_type_results = []
-
-for sec_type in security_types:
-    # Calculate customer-level net buy for this security type
-    customer_sec_net_buy = []
-    for customer in relevant_customers:
-        customer_data = {'Customer_Name': customer}
-        for period_name, (start_date, end_date) in periods.items():
-            net_buy = df[(df['Customer_Name'] == customer) &
-                         (df['Security_Type'] == sec_type) &
-                         (df['Date'] >= start_date) &
-                         (df['Date'] <= end_date)]['Amount'].sum()
-            customer_data[f'NetBuy_{period_name}'] = net_buy
-        customer_sec_net_buy.append(customer_data)
-
-    sec_df = pd.DataFrame(customer_sec_net_buy)
-    sec_df['Change_2025'] = sec_df['NetBuy_post_2025'] - sec_df['NetBuy_pre_2025']
-    sec_df['Change_2024'] = sec_df['NetBuy_post_2024'] - sec_df['NetBuy_pre_2024']
-
-    # Filter out customers who had no activity for this security type in either 2024 or 2025 periods
-    # To avoid division by zero or inflated sample size for specific security types if they never trade them.
-    # We still keep customers with 0 change to ensure they are part of the sample.
-    active_sec_customers = sec_df[(sec_df['NetBuy_pre_2024'] != 0) | (sec_df['NetBuy_post_2024'] != 0) |
-                                  (sec_df['NetBuy_pre_2025'] != 0) | (sec_df['NetBuy_post_2025'] != 0)]
-
-
-    if len(active_sec_customers) > 1: # Need at least two data points for t-test
-        t_stat, p_value = stats.ttest_ind(active_sec_customers['Change_2025'], active_sec_customers['Change_2024'], equal_var=False)
-        did_effect = active_sec_customers['Change_2025'].mean() - active_sec_customers['Change_2024'].mean()
-        security_type_results.append({
-            'Security_Type': sec_type,
-            'DiD_Effect_Mean': did_effect,
-            'T_Statistic': t_stat,
-            'P_Value': p_value
-        })
-    else:
-        security_type_results.append({
-            'Security_Type': sec_type,
-            'DiD_Effect_Mean': 0,
-            'T_Statistic': np.nan,
-            'P_Value': np.nan
-        })
-
-sec_results_df = pd.DataFrame(security_type_results)
-print(sec_results_df.round(4))
-
-print("\nInterpretation for Security Types:")
-for index, row in sec_results_df.iterrows():
-    if row['P_Value'] < 0.05:
-        print(f"  - {row['Security_Type']}: Significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). This indicates a change in net buy for this security type beyond seasonal trends.")
-    elif pd.isna(row['P_Value']):
-        print(f"  - {row['Security_Type']}: Insufficient data for robust analysis.")
-    else:
-        print(f"  - {row['Security_Type']}: No significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). Change likely due to seasonality.")
-print("-" * 50)
-
-# --- 6. Industry Impact (DiD for each industry) ---
-print("--- 6. Industry Impact ---")
-
-industry_results = []
-
-for industry in industries:
-    # Get customers belonging to this industry
-    industry_customers = df[df['Customer_Industry'] == industry]['Customer_Name'].unique()
-
-    # Filter the already summarized customer_summary_df for these customers
-    industry_summary_df = customer_summary_df[customer_summary_df['Customer_Name'].isin(industry_customers)].copy()
-
-    # Filter out customers with no activity in either year's relevant periods for this industry
-    active_ind_customers = industry_summary_df[(industry_summary_df['NetBuy_pre_2024'] != 0) | (industry_summary_df['NetBuy_post_2024'] != 0) |
-                                               (industry_summary_df['NetBuy_pre_2025'] != 0) | (industry_summary_df['NetBuy_post_2025'] != 0)]
-
-
-    if len(active_ind_customers) > 1: # Need at least two data points for t-test
-        t_stat, p_value = stats.ttest_ind(active_ind_customers['Change_2025'], active_ind_customers['Change_2024'], equal_var=False)
-        did_effect = active_ind_customers['Change_2025'].mean() - active_ind_customers['Change_2024'].mean()
-        industry_results.append({
-            'Industry': industry,
-            'DiD_Effect_Mean': did_effect,
-            'T_Statistic': t_stat,
-            'P_Value': p_value
-        })
-    else:
-        industry_results.append({
-            'Industry': industry,
-            'DiD_Effect_Mean': 0,
-            'T_Statistic': np.nan,
-            'P_Value': np.nan
-        })
-
-ind_results_df = pd.DataFrame(industry_results)
-print(ind_results_df.round(4))
-
-print("\nInterpretation for Industries:")
-for index, row in ind_results_df.iterrows():
-    if row['P_Value'] < 0.05:
-        print(f"  - {row['Industry']}: Significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). This indicates a change in net buy for this industry beyond seasonal trends.")
-    elif pd.isna(row['P_Value']):
-        print(f"  - {row['Industry']}: Insufficient data for robust analysis.")
-    else:
-        print(f"  - {row['Industry']}: No significant impact (DiD Effect: {row['DiD_Effect_Mean']:,.2f}, P-value: {row['P_Value']:.4f}). Change likely due to seasonality.")
-print("-" * 50)
-
-print("\n--- Analysis Complete ---")
-print("Remember to critically interpret these statistical results in the context of business significance and potential confounding factors for your presentation.")
+if __name__ == "__main__":
+    # URL to scrape
+    url = "https://hk.centanet.com/findproperty/centadata-details/%E5%A4%AA%E5%8F%A4%E5%9F%8E_3-OVDUURFSRJ"
+    
+    # Run the scraper
+    scrape_centanet_property(url)
