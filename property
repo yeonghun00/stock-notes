@@ -1,0 +1,192 @@
+import requests
+from bs4 import BeautifulSoup
+import json
+import time
+import re
+from urllib.parse import urljoin
+from typing import Dict, List, Optional
+
+class SimplePropertyScraper:
+    """Simplified synchronous version for easier understanding and debugging"""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+    
+    def scrape_property(self, url: str) -> Dict:
+        """Scrape a single property page"""
+        print(f"Scraping: {url}")
+        
+        try:
+            response = self.session.get(url)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Initialize property data
+            property_data = {
+                'url': url,
+                'property_id': re.search(r'property-(\d+)', url).group(1) if re.search(r'property-(\d+)', url) else '',
+                'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            # Extract text content and parse it
+            content = soup.get_text()
+            
+            # Price extraction patterns
+            patterns = {
+                'sell_price': r'Sell (?:Price:?\s*)?HKD\$?([\d.,]+\s*(?:M|Million))',
+                'valuation': r'Valuation[^H]*HKD\$?([\d.,]+\s*(?:M|Million))',
+                'mortgage_payment': r'Mortgage Monthly Repayment[^H]*HKD\$?([\d,]+)',
+                'gross_area': r'Gross Area[^\d]*(\d+)\s*ft²',
+                'saleable_area': r'Saleable Area[^\d]*(\d+)\s*ft²',
+                'estate_name': r'Estate\s*([^\n]+?)(?:New Territories|Hong Kong|Kowloon)',
+                'floor_zone': r'Floor zone\s*([^\n]+)',
+                'bedrooms': r'(\d+)\s*Bedroom',
+                'building_age': r'Building age:\s*(\d+)\s*Year'
+            }
+            
+            # Extract data using patterns
+            for key, pattern in patterns.items():
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    property_data[key] = match.group(1).strip()
+            
+            # Extract unit prices
+            unit_price_match = re.search(r'Unit Price:\s*@([\d,]+)', content)
+            if unit_price_match:
+                property_data['unit_price'] = unit_price_match.group(1)
+            
+            # Find transaction links
+            transaction_links = soup.find_all('a', href=re.compile(r'/transaction/deal-\d+'))
+            property_data['transaction_urls'] = [urljoin(url, link['href']) for link in transaction_links[:5]]
+            
+            # Scrape transactions
+            property_data['transactions'] = []
+            for trans_url in property_data['transaction_urls']:
+                time.sleep(1)  # Rate limiting
+                transaction = self.scrape_transaction(trans_url)
+                if transaction:
+                    property_data['transactions'].append(transaction)
+            
+            return property_data
+            
+        except Exception as e:
+            print(f"Error scraping {url}: {str(e)}")
+            return None
+    
+    def scrape_transaction(self, url: str) -> Optional[Dict]:
+        """Scrape a transaction page"""
+        try:
+            response = self.session.get(url)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            transaction = {'url': url}
+            content = soup.get_text()
+            
+            # Extract transaction details
+            patterns = {
+                'property_name': r'([^,]+),\s*Flat',
+                'sold_price': r'Sold Price:\s*HKD\$?([\d.,]+\s*(?:M|Million))',
+                'registry_date': r'Registry Date:\s*([\d-]+)',
+                'gross_area': r'Gross area:\s*(?:Gross\s*)?(\d+)\s*ft²',
+                'saleable_area': r'Saleable area:\s*(\d+)\s*ft²',
+                'unit_price': r'Unit Price:\s*\$?([\d,]+)',
+                'bedrooms': r'Bedroom:\s*(\d+)\s*Room'
+            }
+            
+            for key, pattern in patterns.items():
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    transaction[key] = match.group(1).strip()
+            
+            return transaction
+            
+        except Exception as e:
+            print(f"Error scraping transaction {url}: {str(e)}")
+            return None
+    
+    def get_property_listings(self, base_url: str, max_pages: int = 3) -> List[str]:
+        """Get property URLs from listing pages"""
+        property_urls = []
+        
+        for page in range(1, max_pages + 1):
+            url = f"{base_url}?page={page}" if page > 1 else base_url
+            print(f"Fetching page {page}...")
+            
+            try:
+                response = self.session.get(url)
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Find property links
+                links = soup.find_all('a', href=re.compile(r'/buy/residential/property-\d+'))
+                
+                for link in links:
+                    full_url = urljoin(base_url, link['href'])
+                    if full_url not in property_urls:
+                        property_urls.append(full_url)
+                
+                time.sleep(1)  # Rate limiting
+                
+            except Exception as e:
+                print(f"Error fetching page {page}: {str(e)}")
+        
+        return property_urls
+    
+    def scrape_all(self, base_url: str, max_properties: int = 10) -> List[Dict]:
+        """Main method to scrape all properties"""
+        # Get property listings
+        print("Getting property listings...")
+        property_urls = self.get_property_listings(base_url, max_pages=2)
+        print(f"Found {len(property_urls)} properties")
+        
+        # Limit to max_properties
+        property_urls = property_urls[:max_properties]
+        
+        # Scrape each property
+        properties = []
+        for i, url in enumerate(property_urls, 1):
+            print(f"\nProcessing property {i}/{len(property_urls)}")
+            property_data = self.scrape_property(url)
+            if property_data:
+                properties.append(property_data)
+            time.sleep(1.5)  # Rate limiting
+        
+        return properties
+    
+    def save_results(self, properties: List[Dict], filename: str = "properties_simple.json"):
+        """Save results to JSON file"""
+        output = {
+            'total_properties': len(properties),
+            'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'properties': properties
+        }
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(output, f, indent=2, ensure_ascii=False)
+        
+        print(f"\nSaved {len(properties)} properties to {filename}")
+        
+        # Print summary
+        total_transactions = sum(len(p.get('transactions', [])) for p in properties)
+        print(f"Total transactions scraped: {total_transactions}")
+
+# Usage example
+if __name__ == "__main__":
+    scraper = SimplePropertyScraper()
+    
+    # Scrape properties
+    base_url = "https://www.28hse.com/en/buy/residential"
+    properties = scraper.scrape_all(base_url, max_properties=5)
+    
+    # Save results
+    scraper.save_results(properties)
+    
+    # Print example
+    if properties:
+        print("\nExample property:")
+        example = properties[0]
+        print(f"- ID: {example.get('property_id')}")
+        print(f"- Price: {example.get('sell_price')}")
+        print(f"- Area: {example.get('gross_area')}")
+        print(f"- Transactions found: {len(example.get('transactions', []))}")
