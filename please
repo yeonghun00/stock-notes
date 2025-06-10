@@ -1,939 +1,804 @@
+#!/usr/bin/env python3
+"""
+Banking Trade Data Analysis
+Senior Data Scientist Approach for RM Insights
+"""
 
-# --- 2. Define Time Periods ---
-print("--- Defining Time Periods ---")
-tariff_date = pd.Timestamp('2025-04-02')
-pre_days = 30
-post_days = 30
-
-all_business_days = pd.date_range(start='2023-01-01', end='2025-05-29', freq='B')
-tariff_idx = all_business_days.get_loc(tariff_date)
-
-pre_2025_start_idx = max(0, tariff_idx - pre_days)
-pre_2025_start_date = all_business_days[pre_2025_start_idx]
-pre_2025_end_date = tariff_date - pd.Timedelta(days=1)
-
-post_2025_end_idx = min(len(all_business_days) - 1, tariff_idx + post_days - 1)
-post_2025_end_date = all_business_days[post_2025_end_idx]
-post_2025_start_date = tariff_date
-
-pre_2024_start_date = pre_2025_start_date - pd.DateOffset(years=1)
-pre_2024_end_date = pre_2025_end_date - pd.DateOffset(years=1)
-post_2024_start_date = post_2025_start_date - pd.DateOffset(years=1)
-post_2024_end_date = post_2025_end_date - pd.DateOffset(years=1)
-
-periods = {
-    'pre_2025': (pre_2025_start_date, pre_2025_end_date),
-    'post_2025': (post_2025_start_date, post_2025_end_date),
-    'pre_2024': (pre_2024_start_date, pre_2024_end_date),
-    'post_2024': (post_2024_start_date, post_2024_end_date),
-}
-
-for name, (start, end) in periods.items():
-    print(f"{name.replace('_', ' ').title()}: {start.date()} to {end.date()}")
-
-# --- 3. OPTIMIZED: Single Aggregation for All Analyses ---
-print("\n--- Optimized Aggregation for All Analyses ---")
-start_time = time.time()
-
-# Create period indicators for efficient filtering
-def assign_period(date):
-    for period_name, (start_date, end_date) in periods.items():
-        if start_date <= date <= end_date:
-            return period_name
-    return None
-
-# Filter data to only relevant periods first
-df_filtered = df[df['Date'].apply(assign_period).notna()].copy()
-df_filtered['Period'] = df_filtered['Date'].apply(assign_period)
-
-print(f"Filtered data from {len(df)} to {len(df_filtered)} rows for analysis periods")
-
-# Single comprehensive aggregation
-# Group by Customer, Period, Security_Type, and Industry to get all combinations at once
-agg_data = df_filtered.groupby([
-    'Customer_Name', 'Customer_Industry', 'Period', 'Security_Type'
-])['Amount'].sum().reset_index()
-
-print(f"Aggregation completed in {time.time() - start_time:.2f} seconds")
-
-# --- 4. Overall Net Buy Analysis (Same as before) ---
-print("\n--- 4. Overall Net Buy Analysis ---")
-
-# Pivot to get customer-period level data
-customer_period = df_filtered.groupby(['Customer_Name', 'Period'])['Amount'].sum().reset_index()
-customer_period_pivot = customer_period.pivot(index='Customer_Name', columns='Period', values='Amount').fillna(0)
-
-# Calculate changes
-customer_period_pivot['Change_2025'] = customer_period_pivot['post_2025'] - customer_period_pivot['pre_2025']
-customer_period_pivot['Change_2024'] = customer_period_pivot['post_2024'] - customer_period_pivot['pre_2024']
-
-# Statistical tests
-t_stat, p_value = stats.ttest_ind(customer_period_pivot['Change_2025'], 
-                                  customer_period_pivot['Change_2024'], 
-                                  equal_var=False)
-
-# Descriptive statistics for intuitive interpretation
-avg_pre_2025 = customer_period_pivot['pre_2025'].mean()
-avg_post_2025 = customer_period_pivot['post_2025'].mean()
-avg_change_2025 = customer_period_pivot['Change_2025'].mean()
-avg_change_2024 = customer_period_pivot['Change_2024'].mean()
-
-print("=== OVERALL NET BUY SUMMARY ===")
-print(f"2025 Before Tariff (Average): ${avg_pre_2025:,.0f}")
-print(f"2025 After Tariff (Average): ${avg_post_2025:,.0f}")
-print(f"2025 Change (After - Before): ${avg_change_2025:,.0f}")
-print(f"2024 Change (Same Period): ${avg_change_2024:,.0f}")
-print(f"DiD Effect (2025 Change - 2024 Change): ${avg_change_2025 - avg_change_2024:,.2f}")
-print(f"T-statistic: {t_stat:.3f}")
-print(f"P-value: {p_value:.4f}")
-
-if p_value < 0.05:
-    print("Conclusion: Significant change in net buy post-tariff beyond seasonal trends.")
-else:
-    print("Conclusion: No significant difference beyond normal seasonality.")
-
-# --- 5. OPTIMIZED Security Type Analysis ---
-print("\n--- 5. Optimized Security Type Analysis ---")
-start_time = time.time()
-
-# Pivot aggregated data to get customer-period-security level
-sec_pivot = agg_data.pivot_table(
-    index=['Customer_Name'], 
-    columns=['Period', 'Security_Type'], 
-    values='Amount', 
-    fill_value=0
-)
-
-# Get all unique customers for consistent indexing
-all_customers = customer_period_pivot.index
-
-security_type_results = []
-
-for sec_type in security_types:
-    try:
-        # Create DataFrame with proper index from all customers
-        sec_data_dict = {}
-        
-        for period in ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']:
-            if ('Period' in sec_pivot.columns.names and 'Security_Type' in sec_pivot.columns.names and 
-                (period, sec_type) in sec_pivot.columns):
-                sec_data_dict[period] = sec_pivot[(period, sec_type)]
-            else:
-                # Create a Series with zeros for all customers
-                sec_data_dict[period] = pd.Series(0, index=all_customers)
-        
-        sec_data = pd.DataFrame(sec_data_dict)
-        
-        sec_data['Change_2025'] = sec_data['post_2025'] - sec_data['pre_2025']
-        sec_data['Change_2024'] = sec_data['post_2024'] - sec_data['pre_2024']
-        
-        # Filter active customers for this security type
-        active_mask = (sec_data[['pre_2024', 'post_2024', 'pre_2025', 'post_2025']] != 0).any(axis=1)
-        active_sec_data = sec_data[active_mask]
-        
-        # Calculate descriptive statistics for interpretation
-        avg_pre_2025_sec = active_sec_data['pre_2025'].mean()
-        avg_post_2025_sec = active_sec_data['post_2025'].mean()
-        avg_change_2025_sec = active_sec_data['Change_2025'].mean()
-        avg_change_2024_sec = active_sec_data['Change_2024'].mean()
-        
-        if len(active_sec_data) > 1:
-            t_stat, p_value = stats.ttest_ind(active_sec_data['Change_2025'], 
-                                              active_sec_data['Change_2024'], 
-                                              equal_var=False)
-            did_effect = avg_change_2025_sec - avg_change_2024_sec
-        else:
-            t_stat, p_value, did_effect = np.nan, np.nan, 0
-            
-        security_type_results.append({
-            'Security_Type': sec_type,
-            'Pre_2025_Avg': avg_pre_2025_sec,
-            'Post_2025_Avg': avg_post_2025_sec,
-            'Change_2025_Avg': avg_change_2025_sec,
-            'Change_2024_Avg': avg_change_2024_sec,
-            'DiD_Effect_Mean': did_effect,
-            'T_Statistic': t_stat,
-            'P_Value': p_value,
-            'Active_Customers': len(active_sec_data)
-        })
-        
-    except Exception as e:
-        print(f"Error processing {sec_type}: {e}")
-        security_type_results.append({
-            'Security_Type': sec_type,
-            'Pre_2025_Avg': 0,
-            'Post_2025_Avg': 0,
-            'Change_2025_Avg': 0,
-            'Change_2024_Avg': 0,
-            'DiD_Effect_Mean': 0,
-            'T_Statistic': np.nan,
-            'P_Value': np.nan,
-            'Active_Customers': 0
-        })
-
-print("\n=== SECURITY TYPE DETAILED RESULTS ===")
-sec_results_df = pd.DataFrame(security_type_results)
-print(sec_results_df[['Security_Type', 'Pre_2025_Avg', 'Post_2025_Avg', 'Change_2025_Avg', 'DiD_Effect_Mean', 'P_Value', 'Active_Customers']].round(0))
-
-print("\nSecurity Type Interpretations:")
-for _, row in sec_results_df.iterrows():
-    if pd.notna(row['P_Value']) and row['P_Value'] < 0.05:
-        direction = "increased" if row['Change_2025_Avg'] > 0 else "decreased"
-        print(f"  - {row['Security_Type']}: SIGNIFICANT IMPACT")
-        print(f"    • Before Tariff: ${row['Pre_2025_Avg']:,.0f} | After Tariff: ${row['Post_2025_Avg']:,.0f}")
-        print(f"    • Net buy {direction} by ${abs(row['Change_2025_Avg']):,.0f} (DiD: ${row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-    elif row['Active_Customers'] < 2:
-        print(f"  - {row['Security_Type']}: Insufficient data ({row['Active_Customers']} active customers)")
-    else:
-        print(f"  - {row['Security_Type']}: No significant impact (p={row['P_Value']:.4f})")
-
-# --- 6. OPTIMIZED Industry Analysis ---
-print("\n--- 6. Optimized Industry Analysis ---")
-start_time = time.time()
-
-# Get customer-industry mapping - handle potential duplicates
-customer_industry_df = df[['Customer_Name', 'Customer_Industry']].drop_duplicates()
-
-# Check for customers with multiple industries (data quality issue)
-customer_counts = customer_industry_df['Customer_Name'].value_counts()
-if (customer_counts > 1).any():
-    print(f"Warning: {(customer_counts > 1).sum()} customers have multiple industries. Using first occurrence.")
-    # Keep only the first occurrence for each customer
-    customer_industry_df = customer_industry_df.drop_duplicates(subset=['Customer_Name'], keep='first')
-
-customer_industry_map = customer_industry_df.set_index('Customer_Name')['Customer_Industry']
-
-# Add industry info to customer_period_pivot
-customer_period_with_industry = customer_period_pivot.copy()
-customer_period_with_industry = customer_period_with_industry.reset_index()  # Reset index to make Customer_Name a column
-customer_period_with_industry['Industry'] = customer_period_with_industry['Customer_Name'].map(customer_industry_map)
-
-industry_results = []
-
-for industry in industries:
-    industry_data = customer_period_with_industry[customer_period_with_industry['Industry'] == industry]
-    
-    if len(industry_data) == 0:
-        industry_results.append({
-            'Industry': industry,
-            'Pre_2025_Avg': 0,
-            'Post_2025_Avg': 0,
-            'Change_2025_Avg': 0,
-            'Change_2024_Avg': 0,
-            'DiD_Effect_Mean': 0,
-            'T_Statistic': np.nan,
-            'P_Value': np.nan,
-            'Active_Customers': 0
-        })
-        continue
-    
-    # Filter active customers
-    active_cols = ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']
-    active_mask = (industry_data[active_cols] != 0).any(axis=1)
-    active_industry_data = industry_data[active_mask]
-    
-    # Calculate descriptive statistics
-    avg_pre_2025_ind = active_industry_data['pre_2025'].mean() if len(active_industry_data) > 0 else 0
-    avg_post_2025_ind = active_industry_data['post_2025'].mean() if len(active_industry_data) > 0 else 0
-    avg_change_2025_ind = active_industry_data['Change_2025'].mean() if len(active_industry_data) > 0 else 0
-    avg_change_2024_ind = active_industry_data['Change_2024'].mean() if len(active_industry_data) > 0 else 0
-    
-    if len(active_industry_data) > 1:
-        t_stat, p_value = stats.ttest_ind(active_industry_data['Change_2025'], 
-                                          active_industry_data['Change_2024'], 
-                                          equal_var=False)
-        did_effect = avg_change_2025_ind - avg_change_2024_ind
-    else:
-        t_stat, p_value, did_effect = np.nan, np.nan, 0
-        
-    industry_results.append({
-        'Industry': industry,
-        'Pre_2025_Avg': avg_pre_2025_ind,
-        'Post_2025_Avg': avg_post_2025_ind,
-        'Change_2025_Avg': avg_change_2025_ind,
-        'Change_2024_Avg': avg_change_2024_ind,
-        'DiD_Effect_Mean': did_effect,
-        'T_Statistic': t_stat,
-        'P_Value': p_value,
-        'Active_Customers': len(active_industry_data)
-    })
-
-ind_results_df = pd.DataFrame(industry_results)
-print(f"Industry analysis completed in {time.time() - start_time:.2f} seconds")
-print(ind_results_df.round(4))
-
-print("\nIndustry Interpretations:")
-for _, row in ind_results_df.iterrows():
-    if pd.notna(row['P_Value']) and row['P_Value'] < 0.05:
-        print(f"  - {row['Industry']}: Significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-    elif row['Active_Customers'] < 2:
-        print(f"  - {row['Industry']}: Insufficient data ({row['Active_Customers']} active customers)")
-    else:
-        print(f"  - {row['Industry']}: No significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-
-print("\n--- Analysis Complete ---")
-
-
-
-
-#### NEW
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import warnings
 from scipy import stats
-import statsmodels.formula.api as smf
-import time
-
-# --- 1. Regenerate Dummy Data (Your provided code) ---
-# Generate date ranges
-start_date = '2023-01-01'
-end_date = '2025-05-29'
-dates = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days only
-
-# Key events
-tariff_date = pd.Timestamp('2025-04-02')
-
-# Customer and security setup
-n_customers = 500
-customers = [f'Customer_{i:03d}' for i in range(n_customers)]
-industries = ['Technology', 'Manufacturing', 'Finance', 'Retail', 'Healthcare',
-              'Energy', 'Real Estate', 'Consumer Goods']
-security_types = ['Foreign Stocks', 'Local Stocks', 'Bonds', 'Certificate of Deposit',
-                  'Unit Trusts', 'ETFs']
-
-# Generate trades
-trades = []
-for date in dates:
-    # Adjust trading patterns based on events
-    if date >= tariff_date:
-        foreign_bias = 0.25
-        volume_multiplier = 1.3
-        bond_bias = 0.2
-    elif date >= pd.Timestamp('2025-01-01'):
-        foreign_bias = 0.45
-        volume_multiplier = 1.1
-        bond_bias = 0.1
-    else:
-        foreign_bias = 0.5
-        volume_multiplier = 1.0
-        bond_bias = 0.05
-
-    n_trades = np.random.poisson(200 * volume_multiplier)
-
-    for _ in range(n_trades):
-        customer = np.random.choice(customers)
-        industry = np.random.choice(industries)
-
-        security_probs = {
-            'Foreign Stocks': foreign_bias,
-            'Local Stocks': 0.4 - (foreign_bias - 0.25),
-            'Bonds': bond_bias,
-            'Certificate of Deposit': 0.05,
-            'Unit Trusts': 0.03,
-            'ETFs': 0.02
-        }
-        sum_probs = sum(security_probs.values())
-        security_probs = {k: v / sum_probs for k, v in security_probs.items()}
-
-        security_type = np.random.choice(list(security_probs.keys()), p=list(security_probs.values()))
-
-        if np.random.rand() < 0.55:
-            investment_amount = np.random.lognormal(10, 1.5) * 1000
-        else:
-            investment_amount = -(np.random.lognormal(10, 1.5) * 1000)
-
-        trades.append({
-            'Date': date,
-            'Customer_Name': customer,
-            'Customer_Industry': industry,
-            'Amount': investment_amount,
-            'Security_Type': security_type
-        })
-
-df = pd.DataFrame(trades)
-df['Date'] = pd.to_datetime(df['Date'])
-print(f"Total trades generated: {len(df)}")
-print(f"Data range: {df['Date'].min().date()} to {df['Date'].max().date()}\n")
-
-# --- 2. Define Time Periods ---
-print("--- Defining Time Periods ---")
-tariff_date = pd.Timestamp('2025-04-02')
-pre_days = 30
-post_days = 30
-
-all_business_days = pd.date_range(start='2023-01-01', end='2025-05-29', freq='B')
-tariff_idx = all_business_days.get_loc(tariff_date)
-
-pre_2025_start_idx = max(0, tariff_idx - pre_days)
-pre_2025_start_date = all_business_days[pre_2025_start_idx]
-pre_2025_end_date = tariff_date - pd.Timedelta(days=1)
-
-post_2025_end_idx = min(len(all_business_days) - 1, tariff_idx + post_days - 1)
-post_2025_end_date = all_business_days[post_2025_end_idx]
-post_2025_start_date = tariff_date
-
-pre_2024_start_date = pre_2025_start_date - pd.DateOffset(years=1)
-pre_2024_end_date = pre_2025_end_date - pd.DateOffset(years=1)
-post_2024_start_date = post_2025_start_date - pd.DateOffset(years=1)
-post_2024_end_date = post_2025_end_date - pd.DateOffset(years=1)
-
-periods = {
-    'pre_2025': (pre_2025_start_date, pre_2025_end_date),
-    'post_2025': (post_2025_start_date, post_2025_end_date),
-    'pre_2024': (pre_2024_start_date, pre_2024_end_date),
-    'post_2024': (post_2024_start_date, post_2024_end_date),
-}
-
-for name, (start, end) in periods.items():
-    print(f"{name.replace('_', ' ').title()}: {start.date()} to {end.date()}")
-
-# --- 3. OPTIMIZED: Single Aggregation for All Analyses ---
-print("\n--- Optimized Aggregation for All Analyses ---")
-start_time = time.time()
-
-# Create period indicators for efficient filtering
-def assign_period(date):
-    for period_name, (start_date, end_date) in periods.items():
-        if start_date <= date <= end_date:
-            return period_name
-    return None
-
-# Filter data to only relevant periods first
-df_filtered = df[df['Date'].apply(assign_period).notna()].copy()
-df_filtered['Period'] = df_filtered['Date'].apply(assign_period)
-
-print(f"Filtered data from {len(df)} to {len(df_filtered)} rows for analysis periods")
-
-# Single comprehensive aggregation
-# Group by Customer, Period, Security_Type, and Industry to get all combinations at once
-agg_data = df_filtered.groupby([
-    'Customer_Name', 'Customer_Industry', 'Period', 'Security_Type'
-])['Amount'].sum().reset_index()
-
-print(f"Aggregation completed in {time.time() - start_time:.2f} seconds")
-
-# --- 4. Overall Net Buy Analysis (Same as before) ---
-print("\n--- 4. Overall Net Buy Analysis ---")
-
-# Pivot to get customer-period level data
-customer_period = df_filtered.groupby(['Customer_Name', 'Period'])['Amount'].sum().reset_index()
-customer_period_pivot = customer_period.pivot(index='Customer_Name', columns='Period', values='Amount').fillna(0)
-
-# Calculate changes
-customer_period_pivot['Change_2025'] = customer_period_pivot['post_2025'] - customer_period_pivot['pre_2025']
-customer_period_pivot['Change_2024'] = customer_period_pivot['post_2024'] - customer_period_pivot['pre_2024']
-
-# Statistical tests
-t_stat, p_value = stats.ttest_ind(customer_period_pivot['Change_2025'], 
-                                  customer_period_pivot['Change_2024'], 
-                                  equal_var=False)
-
-print(f"DiD (2025 Change - 2024 Change) - Mean difference: {customer_period_pivot['Change_2025'].mean() - customer_period_pivot['Change_2024'].mean():,.2f}")
-print(f"T-statistic: {t_stat:.3f}")
-print(f"P-value: {p_value:.4f}")
-
-if p_value < 0.05:
-    print("Conclusion: Significant change in net buy post-tariff beyond seasonal trends.")
-else:
-    print("Conclusion: No significant difference beyond normal seasonality.")
-
-# --- 5. OPTIMIZED Security Type Analysis ---
-print("\n--- 5. Optimized Security Type Analysis ---")
-start_time = time.time()
-
-# Pivot aggregated data to get customer-period-security level
-sec_pivot = agg_data.pivot_table(
-    index=['Customer_Name'], 
-    columns=['Period', 'Security_Type'], 
-    values='Amount', 
-    fill_value=0
-)
-
-security_type_results = []
-
-for sec_type in security_types:
-    try:
-        # Extract data for this security type
-        sec_data = pd.DataFrame({
-            'pre_2024': sec_pivot[('pre_2024', sec_type)] if ('pre_2024', sec_type) in sec_pivot.columns else 0,
-            'post_2024': sec_pivot[('post_2024', sec_type)] if ('post_2024', sec_type) in sec_pivot.columns else 0,
-            'pre_2025': sec_pivot[('pre_2025', sec_type)] if ('pre_2025', sec_type) in sec_pivot.columns else 0,
-            'post_2025': sec_pivot[('post_2025', sec_type)] if ('post_2025', sec_type) in sec_pivot.columns else 0,
-        })
-        
-        sec_data['Change_2025'] = sec_data['post_2025'] - sec_data['pre_2025']
-        sec_data['Change_2024'] = sec_data['post_2024'] - sec_data['pre_2024']
-        
-        # Filter active customers for this security type
-        active_mask = (sec_data[['pre_2024', 'post_2024', 'pre_2025', 'post_2025']] != 0).any(axis=1)
-        active_sec_data = sec_data[active_mask]
-        
-        if len(active_sec_data) > 1:
-            t_stat, p_value = stats.ttest_ind(active_sec_data['Change_2025'], 
-                                              active_sec_data['Change_2024'], 
-                                              equal_var=False)
-            did_effect = active_sec_data['Change_2025'].mean() - active_sec_data['Change_2024'].mean()
-        else:
-            t_stat, p_value, did_effect = np.nan, np.nan, 0
-            
-        security_type_results.append({
-            'Security_Type': sec_type,
-            'DiD_Effect_Mean': did_effect,
-            'T_Statistic': t_stat,
-            'P_Value': p_value,
-            'Active_Customers': len(active_sec_data)
-        })
-        
-    except Exception as e:
-        print(f"Error processing {sec_type}: {e}")
-        security_type_results.append({
-            'Security_Type': sec_type,
-            'DiD_Effect_Mean': 0,
-            'T_Statistic': np.nan,
-            'P_Value': np.nan,
-            'Active_Customers': 0
-        })
-
-sec_results_df = pd.DataFrame(security_type_results)
-print(f"Security type analysis completed in {time.time() - start_time:.2f} seconds")
-print(sec_results_df.round(4))
-
-print("\nSecurity Type Interpretations:")
-for _, row in sec_results_df.iterrows():
-    if pd.notna(row['P_Value']) and row['P_Value'] < 0.05:
-        print(f"  - {row['Security_Type']}: Significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-    elif row['Active_Customers'] < 2:
-        print(f"  - {row['Security_Type']}: Insufficient data ({row['Active_Customers']} active customers)")
-    else:
-        print(f"  - {row['Security_Type']}: No significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-
-
-
-
-# --- 6. OPTIMIZED Industry Analysis ---
-print("\n--- 6. Optimized Industry Analysis ---")
-start_time = time.time()
-
-# Get customer-industry mapping - handle potential duplicates
-customer_industry_df = df[['Customer_Name', 'Customer_Industry']].drop_duplicates()
-
-# Check for customers with multiple industries (data quality issue)
-customer_counts = customer_industry_df['Customer_Name'].value_counts()
-if (customer_counts > 1).any():
-    print(f"Warning: {(customer_counts > 1).sum()} customers have multiple industries. Using first occurrence.")
-    # Keep only the first occurrence for each customer
-    customer_industry_df = customer_industry_df.drop_duplicates(subset=['Customer_Name'], keep='first')
-
-customer_industry_map = customer_industry_df.set_index('Customer_Name')['Customer_Industry']
-
-# Add industry info to customer_period_pivot
-customer_period_with_industry = customer_period_pivot.copy()
-customer_period_with_industry = customer_period_with_industry.reset_index()  # Reset index to make Customer_Name a column
-customer_period_with_industry['Industry'] = customer_period_with_industry['Customer_Name'].map(customer_industry_map)
-
-industry_results = []
-
-for industry in industries:
-    industry_data = customer_period_with_industry[customer_period_with_industry['Industry'] == industry]
-    
-    if len(industry_data) == 0:
-        industry_results.append({
-            'Industry': industry,
-            'DiD_Effect_Mean': 0,
-            'T_Statistic': np.nan,
-            'P_Value': np.nan,
-            'Active_Customers': 0
-        })
-        continue
-    
-    # Filter active customers
-    active_cols = ['pre_2024', 'post_2024', 'pre_2025', 'post_2025']
-    active_mask = (industry_data[active_cols] != 0).any(axis=1)
-    active_industry_data = industry_data[active_mask]
-    
-    if len(active_industry_data) > 1:
-        t_stat, p_value = stats.ttest_ind(active_industry_data['Change_2025'], 
-                                          active_industry_data['Change_2024'], 
-                                          equal_var=False)
-        did_effect = active_industry_data['Change_2025'].mean() - active_industry_data['Change_2024'].mean()
-    else:
-        t_stat, p_value, did_effect = np.nan, np.nan, 0
-        
-    industry_results.append({
-        'Industry': industry,
-        'DiD_Effect_Mean': did_effect,
-        'T_Statistic': t_stat,
-        'P_Value': p_value,
-        'Active_Customers': len(active_industry_data)
-    })
-
-ind_results_df = pd.DataFrame(industry_results)
-print(f"Industry analysis completed in {time.time() - start_time:.2f} seconds")
-print(ind_results_df.round(4))
-
-print("\nIndustry Interpretations:")
-for _, row in ind_results_df.iterrows():
-    if pd.notna(row['P_Value']) and row['P_Value'] < 0.05:
-        print(f"  - {row['Industry']}: Significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-    elif row['Active_Customers'] < 2:
-        print(f"  - {row['Industry']}: Insufficient data ({row['Active_Customers']} active customers)")
-    else:
-        print(f"  - {row['Industry']}: No significant impact (DiD: {row['DiD_Effect_Mean']:,.0f}, p={row['P_Value']:.4f})")
-
-print("\n--- Analysis Complete ---")
-
-
-
-# --- 7. VISUALIZATION FOR PPT (PLOTLY - OPTIMIZED) ---
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import plotly.express as px
+from plotly.subplots import make_subplots
 
-# Set professional color palette
-colors = {
-    'before': '#3498db',  # Blue
-    'after': '#e74c3c',   # Red
-    'positive': '#27ae60', # Green
-    'negative': '#e74c3c', # Red
-    'background': '#f8f9fa',
-    'text': '#2c3e50'
-}
+warnings.filterwarnings('ignore')
 
-# --- Security Type Visualizations ---
-print("\n--- Creating Security Type Visualizations (Plotly) ---")
+# Set style for better visualizations
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
 
-# Filter significant security types and top 7 by absolute change
-sec_significant = sec_results_df[
-    (pd.notna(sec_results_df['P_Value'])) & 
-    (sec_results_df['P_Value'] < 0.05) & 
-    (sec_results_df['Active_Customers'] >= 2)
-].copy()
+# ============================================================================
+# STEP 1: DATA GENERATION
+# ============================================================================
 
-if len(sec_significant) > 0:
-    # Add percentage change calculation
-    sec_significant['Pct_Change'] = ((sec_significant['Post_2025_Avg'] - sec_significant['Pre_2025_Avg']) / 
-                                   sec_significant['Pre_2025_Avg'].abs() * 100)
-    sec_significant['Abs_Change'] = sec_significant['Post_2025_Avg'] - sec_significant['Pre_2025_Avg']
+def generate_dummy_trade_data(n_rows=400000):
+    """
+    Generate realistic dummy trading data for banking analysis
+    """
+    print("Generating dummy trade data...")
     
-    # Select top 7 by absolute change magnitude
-    sec_significant['Abs_Change_Magnitude'] = sec_significant['Abs_Change'].abs()
-    sec_plot_data = sec_significant.nlargest(min(7, len(sec_significant)), 'Abs_Change_Magnitude').reset_index(drop=True)
+    # Define constants
+    industries = ['Technology', 'Finance', 'Healthcare', 'Manufacturing', 
+                 'Retail', 'Energy', 'Real Estate', 'Consumer Goods']
     
-    print(f"Creating charts for {len(sec_plot_data)} security types...")
+    security_types = ['Foreign Stocks', 'Local Stocks (HK)', 'Bonds', 
+                     'Certificate of Deposit', 'Unit Trusts', 'ETFs', 'Derivatives']
     
-    # Create subplots
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=('Net Buy: Before vs After Tariff', 'Difference-in-Differences Impact'),
-        specs=[[{"secondary_y": False}, {"secondary_y": False}]]
-    )
+    # Security type characteristics (base amount ranges)
+    security_params = {
+        'Foreign Stocks': {'min': 50000, 'max': 500000, 'volatility': 0.3},
+        'Local Stocks (HK)': {'min': 30000, 'max': 300000, 'volatility': 0.25},
+        'Bonds': {'min': 100000, 'max': 1000000, 'volatility': 0.1},
+        'Certificate of Deposit': {'min': 200000, 'max': 2000000, 'volatility': 0.05},
+        'Unit Trusts': {'min': 20000, 'max': 200000, 'volatility': 0.2},
+        'ETFs': {'min': 40000, 'max': 400000, 'volatility': 0.25},
+        'Derivatives': {'min': 10000, 'max': 100000, 'volatility': 0.4}
+    }
     
-    # Prepare data for plotting (vectorized)
-    security_types = sec_plot_data['Security_Type'].tolist()
-    pre_values = (sec_plot_data['Pre_2025_Avg']/1000).tolist()
-    post_values = (sec_plot_data['Post_2025_Avg']/1000).tolist()
-    did_values = (sec_plot_data['DiD_Effect_Mean']/1000).tolist()
-    pct_changes = sec_plot_data['Pct_Change'].tolist()
-    p_values = sec_plot_data['P_Value'].tolist()
+    # Generate customer base (more realistic distribution)
+    n_customers = n_rows // 100  # Average 100 trades per customer
     
-    # Chart 1: Before vs After
-    fig.add_trace(
-        go.Bar(
-            name='Before Tariff',
-            x=security_types,
-            y=pre_values,
-            marker_color=colors['before'],
-            opacity=0.8,
-            hovertemplate='<b>%{x}</b><br>Before: $%{y:,.0f}K<extra></extra>'
-        ),
-        row=1, col=1
-    )
+    # Customer distribution: 80% small, 15% medium, 4% large, 1% VIP
+    customer_types = np.random.choice(['Small', 'Medium', 'Large', 'VIP'], 
+                                     n_customers, 
+                                     p=[0.8, 0.15, 0.04, 0.01])
     
-    fig.add_trace(
-        go.Bar(
-            name='After Tariff',
-            x=security_types,
-            y=post_values,
-            marker_color=colors['after'],
-            opacity=0.8,
-            hovertemplate='<b>%{x}</b><br>After: $%{y:,.0f}K<extra></extra>'
-        ),
-        row=1, col=1
-    )
+    customers = []
+    for i in range(n_customers):
+        customers.append({
+            'name': f'Customer_{str(i+1).zfill(5)}',
+            'industry': np.random.choice(industries),
+            'type': customer_types[i],
+            'trading_frequency': np.random.beta(2, 5),  # Most customers trade infrequently
+            'preferred_security': np.random.choice(security_types)
+        })
     
-    # Chart 2: DiD Effects
-    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in did_values]
+    # Generate trades
+    trades = []
+    start_date = datetime(2023, 1, 1)
+    end_date = datetime(2024, 12, 31)
     
-    fig.add_trace(
-        go.Bar(
-            name='DiD Effect',
-            x=security_types,
-            y=did_values,
-            marker_color=bar_colors,
-            opacity=0.8,
-            hovertemplate='<b>%{x}</b><br>DiD Effect: $%{y:,.0f}K<br>P-value: %{customdata:.4f}<extra></extra>',
-            customdata=p_values,
-            showlegend=False
-        ),
-        row=1, col=2
-    )
-    
-    # Add horizontal line at zero for DiD chart
-    fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1, row=1, col=2)
-    
-    # Add annotations in bulk (optimized)
-    annotations = []
-    
-    # Percentage change annotations
-    for i, (sec_type, pct_change, pre_val, post_val) in enumerate(zip(security_types, pct_changes, pre_values, post_values)):
-        color = colors['positive'] if pct_change > 0 else colors['negative']
-        y_pos = max(pre_val, post_val) * 1.15
+    for i in range(n_rows):
+        # Select customer (weighted by type)
+        customer = np.random.choice(customers)
         
-        annotations.append(
-            dict(
-                x=sec_type, y=y_pos, text=f'<b>{pct_change:+.1f}%</b>',
-                showarrow=False, font=dict(color=color, size=12),
-                xref='x', yref='y'
-            )
-        )
-    
-    # Significance annotations
-    for i, (sec_type, p_val, did_val) in enumerate(zip(security_types, p_values, did_values)):
-        if p_val < 0.001:
-            marker = '***'
-        elif p_val < 0.01:
-            marker = '**'
-        elif p_val < 0.05:
-            marker = '*'
+        # Customer type influences trade frequency
+        if customer['type'] == 'VIP':
+            weight = 10
+        elif customer['type'] == 'Large':
+            weight = 5
+        elif customer['type'] == 'Medium':
+            weight = 2
         else:
-            continue
+            weight = 1
+            
+        # Weighted random selection
+        if np.random.random() > (1 / weight):
+            customer = np.random.choice([c for c in customers if c['type'] in ['VIP', 'Large']])
         
-        y_offset = abs(did_val) * 0.15 + 20
-        y_annotation = did_val + y_offset if did_val >= 0 else did_val - y_offset
+        # Generate trade details
+        security_type = customer['preferred_security'] if np.random.random() > 0.3 else np.random.choice(security_types)
+        action = np.random.choice(['Buy', 'Sell'], p=[0.55, 0.45])  # Slight buy bias
         
-        annotations.append(
-            dict(
-                x=sec_type, y=y_annotation, text=f'<b>{marker}</b>',
-                showarrow=False, font=dict(color='black', size=16),
-                xref='x2', yref='y2'
-            )
-        )
-    
-    # Add all annotations at once
-    fig.update_layout(annotations=annotations)
-    
-    # Update layout
-    fig.update_layout(
-        title=dict(
-            text='<b>Tariff Impact Analysis: Security Types</b>',
-            x=0.5,
-            font=dict(size=20, color=colors['text'])
-        ),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.2,
-            xanchor="center",
-            x=0.25
-        ),
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(size=12, color=colors['text']),
-        height=600,
-        width=1400
-    )
-    
-    # Update axes
-    fig.update_xaxes(title_text="Security Type", row=1, col=1, tickangle=45)
-    fig.update_xaxes(title_text="Security Type", row=1, col=2, tickangle=45)
-    fig.update_yaxes(title_text="Net Buy (Thousands $)", row=1, col=1)
-    fig.update_yaxes(title_text="DiD Effect (Thousands $)", row=1, col=2)
-    
-    # Save as high-quality image
-    print("Saving security type chart...")
-    fig.write_image("security_type_analysis.png", width=1400, height=600, scale=2)
-    fig.show()
-
-else:
-    print("No significant security type changes found for visualization")
-
-# --- Industry Visualizations ---
-print("\n--- Creating Industry Visualizations (Plotly) ---")
-
-# Filter significant industries and top 7 by absolute change
-ind_significant = ind_results_df[
-    (pd.notna(ind_results_df['P_Value'])) & 
-    (ind_results_df['P_Value'] < 0.05) & 
-    (ind_results_df['Active_Customers'] >= 2)
-].copy()
-
-if len(ind_significant) > 0:
-    # Add percentage change calculation
-    ind_significant['Pct_Change'] = ((ind_significant['Post_2025_Avg'] - ind_significant['Pre_2025_Avg']) / 
-                                   ind_significant['Pre_2025_Avg'].abs() * 100)
-    ind_significant['Abs_Change'] = ind_significant['Post_2025_Avg'] - ind_significant['Pre_2025_Avg']
-    
-    # Select top 7 by absolute change magnitude
-    ind_significant['Abs_Change_Magnitude'] = ind_significant['Abs_Change'].abs()
-    ind_plot_data = ind_significant.nlargest(min(7, len(ind_significant)), 'Abs_Change_Magnitude').reset_index(drop=True)
-    
-    print(f"Creating charts for {len(ind_plot_data)} industries...")
-    
-    # Truncate long industry names (vectorized)
-    ind_plot_data['Industry_Short'] = [name[:25] + '...' if len(name) > 25 else name for name in ind_plot_data['Industry']]
-    
-    # Create subplots
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=('Net Buy: Before vs After Tariff', 'Difference-in-Differences Impact'),
-        specs=[[{"secondary_y": False}, {"secondary_y": False}]]
-    )
-    
-    # Prepare data for plotting (vectorized)
-    industry_names = ind_plot_data['Industry_Short'].tolist()
-    pre_values = (ind_plot_data['Pre_2025_Avg']/1000).tolist()
-    post_values = (ind_plot_data['Post_2025_Avg']/1000).tolist()
-    did_values = (ind_plot_data['DiD_Effect_Mean']/1000).tolist()
-    pct_changes = ind_plot_data['Pct_Change'].tolist()
-    p_values = ind_plot_data['P_Value'].tolist()
-    
-    # Chart 1: Before vs After
-    fig.add_trace(
-        go.Bar(
-            name='Before Tariff',
-            x=industry_names,
-            y=pre_values,
-            marker_color='#2ecc71',  # Green
-            opacity=0.8,
-            hovertemplate='<b>%{x}</b><br>Before: $%{y:,.0f}K<extra></extra>'
-        ),
-        row=1, col=1
-    )
-    
-    fig.add_trace(
-        go.Bar(
-            name='After Tariff',
-            x=industry_names,
-            y=post_values,
-            marker_color='#f39c12',  # Orange
-            opacity=0.8,
-            hovertemplate='<b>%{x}</b><br>After: $%{y:,.0f}K<extra></extra>'
-        ),
-        row=1, col=1
-    )
-    
-    # Chart 2: DiD Effects
-    bar_colors = [colors['positive'] if x > 0 else colors['negative'] for x in did_values]
-    
-    fig.add_trace(
-        go.Bar(
-            name='DiD Effect',
-            x=industry_names,
-            y=did_values,
-            marker_color=bar_colors,
-            opacity=0.8,
-            hovertemplate='<b>%{x}</b><br>DiD Effect: $%{y:,.0f}K<br>P-value: %{customdata:.4f}<extra></extra>',
-            customdata=p_values,
-            showlegend=False
-        ),
-        row=1, col=2
-    )
-    
-    # Add horizontal line at zero for DiD chart
-    fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1, row=1, col=2)
-    
-    # Add annotations in bulk (optimized)
-    annotations = []
-    
-    # Percentage change annotations
-    for i, (ind_name, pct_change, pre_val, post_val) in enumerate(zip(industry_names, pct_changes, pre_values, post_values)):
-        color = colors['positive'] if pct_change > 0 else colors['negative']
-        y_pos = max(pre_val, post_val) * 1.15
+        # Generate amount based on security type and customer type
+        params = security_params[security_type]
+        base_amount = np.random.uniform(params['min'], params['max'])
         
-        annotations.append(
-            dict(
-                x=ind_name, y=y_pos, text=f'<b>{pct_change:+.1f}%</b>',
-                showarrow=False, font=dict(color=color, size=12),
-                xref='x', yref='y'
-            )
-        )
+        # Customer type multiplier
+        if customer['type'] == 'VIP':
+            base_amount *= np.random.uniform(5, 20)
+        elif customer['type'] == 'Large':
+            base_amount *= np.random.uniform(2, 5)
+        elif customer['type'] == 'Medium':
+            base_amount *= np.random.uniform(1, 2)
+        
+        # Add some volatility
+        base_amount *= (1 + np.random.normal(0, params['volatility']))
+        
+        amount = base_amount if action == 'Buy' else -base_amount
+        
+        # Generate date with patterns
+        # More trades on weekdays, month-end, and quarter-end
+        days_range = (end_date - start_date).days
+        trade_date = start_date + timedelta(days=np.random.randint(0, days_range))
+        
+        # Skip weekends
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+        
+        # Month-end boost
+        if trade_date.day >= 25:
+            if np.random.random() > 0.7:
+                continue  # Generate another trade for month-end
+        
+        trades.append({
+            'Date': trade_date.strftime('%Y-%m-%d'),
+            'Customer Name': customer['name'],
+            'Customer Industry': customer['industry'],
+            'Investment': action,
+            'Amount': round(amount, 2),
+            'Security ID': f"SEC_{str(np.random.randint(1000, 9999)).zfill(4)}",
+            'Security Type': security_type
+        })
     
-    # Significance annotations
-    for i, (ind_name, p_val, did_val) in enumerate(zip(industry_names, p_values, did_values)):
-        if p_val < 0.001:
-            marker = '***'
-        elif p_val < 0.01:
-            marker = '**'
-        elif p_val < 0.05:
-            marker = '*'
+    # Convert to DataFrame and sort by date
+    df = pd.DataFrame(trades)
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').reset_index(drop=True)
+    
+    print(f"Generated {len(df)} trades for {df['Customer Name'].nunique()} customers")
+    return df
+
+# ============================================================================
+# STEP 2: DATA EXPLORATION AND BASIC STATISTICS
+# ============================================================================
+
+def explore_data(df):
+    """
+    Basic data exploration and statistics
+    """
+    print("\n" + "="*60)
+    print("DATA EXPLORATION")
+    print("="*60)
+    
+    print(f"\nDataset Shape: {df.shape}")
+    print(f"\nDate Range: {df['Date'].min()} to {df['Date'].max()}")
+    
+    print("\nData Types:")
+    print(df.dtypes)
+    
+    print("\nMissing Values:")
+    print(df.isnull().sum())
+    
+    print("\nBasic Statistics:")
+    print(df.describe())
+    
+    print("\nUnique Values:")
+    for col in ['Customer Industry', 'Investment', 'Security Type']:
+        print(f"\n{col}:")
+        print(df[col].value_counts())
+    
+    return df
+
+# ============================================================================
+# STEP 3: KEY METRICS CALCULATION
+# ============================================================================
+
+def calculate_key_metrics(df):
+    """
+    Calculate executive-level key metrics
+    """
+    print("\n" + "="*60)
+    print("KEY BUSINESS METRICS")
+    print("="*60)
+    
+    metrics = {}
+    
+    # Overall metrics
+    metrics['total_volume'] = df['Amount'].abs().sum()
+    metrics['total_trades'] = len(df)
+    metrics['unique_customers'] = df['Customer Name'].nunique()
+    metrics['avg_trade_size'] = df['Amount'].abs().mean()
+    metrics['median_trade_size'] = df['Amount'].abs().median()
+    
+    # Buy/Sell metrics
+    buy_trades = df[df['Investment'] == 'Buy']
+    sell_trades = df[df['Investment'] == 'Sell']
+    
+    metrics['buy_count'] = len(buy_trades)
+    metrics['sell_count'] = len(sell_trades)
+    metrics['buy_ratio'] = metrics['buy_count'] / metrics['total_trades']
+    metrics['buy_volume'] = buy_trades['Amount'].sum()
+    metrics['sell_volume'] = sell_trades['Amount'].abs().sum()
+    metrics['net_flow'] = metrics['buy_volume'] - metrics['sell_volume']
+    
+    # Customer metrics
+    customer_volumes = df.groupby('Customer Name')['Amount'].apply(lambda x: x.abs().sum())
+    metrics['avg_customer_volume'] = customer_volumes.mean()
+    metrics['top_10_customers_pct'] = customer_volumes.nlargest(10).sum() / metrics['total_volume']
+    
+    # Print formatted metrics
+    print(f"\nTotal Trading Volume: ${metrics['total_volume']:,.0f}")
+    print(f"Total Trades: {metrics['total_trades']:,}")
+    print(f"Unique Customers: {metrics['unique_customers']:,}")
+    print(f"Average Trade Size: ${metrics['avg_trade_size']:,.0f}")
+    print(f"Median Trade Size: ${metrics['median_trade_size']:,.0f}")
+    print(f"\nBuy Ratio: {metrics['buy_ratio']:.1%}")
+    print(f"Net Capital Flow: ${metrics['net_flow']:,.0f}")
+    print(f"Top 10 Customers Control: {metrics['top_10_customers_pct']:.1%} of volume")
+    
+    return metrics
+
+# ============================================================================
+# STEP 4: TIME SERIES ANALYSIS
+# ============================================================================
+
+def analyze_time_series(df):
+    """
+    Analyze trading patterns over time
+    """
+    print("\n" + "="*60)
+    print("TIME SERIES ANALYSIS")
+    print("="*60)
+    
+    # Monthly aggregation
+    df['YearMonth'] = df['Date'].dt.to_period('M')
+    
+    monthly_stats = df.groupby('YearMonth').agg({
+        'Amount': [
+            lambda x: x.abs().sum(),  # Total volume
+            lambda x: (x > 0).sum(),  # Buy count
+            lambda x: (x < 0).sum(),  # Sell count
+            'count'  # Total trades
+        ],
+        'Customer Name': 'nunique'
+    })
+    
+    monthly_stats.columns = ['Volume', 'Buy_Count', 'Sell_Count', 'Total_Trades', 'Active_Customers']
+    monthly_stats['Buy_Ratio'] = monthly_stats['Buy_Count'] / monthly_stats['Total_Trades']
+    monthly_stats['Avg_Trade_Size'] = monthly_stats['Volume'] / monthly_stats['Total_Trades']
+    
+    # Calculate growth rates
+    monthly_stats['Volume_Growth'] = monthly_stats['Volume'].pct_change()
+    monthly_stats['Customer_Growth'] = monthly_stats['Active_Customers'].pct_change()
+    
+    # Identify trends
+    from scipy import stats
+    
+    x = np.arange(len(monthly_stats))
+    slope, intercept, r_value, p_value, std_err = stats.linregress(x, monthly_stats['Volume'])
+    
+    print(f"\nVolume Trend: {'Growing' if slope > 0 else 'Declining'} at ${slope:,.0f}/month")
+    print(f"Trend Strength (R²): {r_value**2:.3f}")
+    
+    # Seasonality detection
+    monthly_stats['Month'] = monthly_stats.index.month
+    seasonal_volume = monthly_stats.groupby('Month')['Volume'].mean()
+    
+    print("\nSeasonal Patterns (Average Volume by Month):")
+    for month, volume in seasonal_volume.items():
+        print(f"  Month {month}: ${volume:,.0f}")
+    
+    # Visualize
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Volume trend
+    axes[0, 0].plot(monthly_stats.index.astype(str), monthly_stats['Volume']/1e6)
+    axes[0, 0].set_title('Monthly Trading Volume Trend')
+    axes[0, 0].set_ylabel('Volume ($M)')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    
+    # Buy/Sell ratio
+    axes[0, 1].plot(monthly_stats.index.astype(str), monthly_stats['Buy_Ratio']*100)
+    axes[0, 1].axhline(y=50, color='r', linestyle='--', alpha=0.5)
+    axes[0, 1].set_title('Buy Ratio Trend')
+    axes[0, 1].set_ylabel('Buy Ratio (%)')
+    axes[0, 1].tick_params(axis='x', rotation=45)
+    
+    # Active customers
+    axes[1, 0].plot(monthly_stats.index.astype(str), monthly_stats['Active_Customers'])
+    axes[1, 0].set_title('Monthly Active Customers')
+    axes[1, 0].set_ylabel('Customer Count')
+    axes[1, 0].tick_params(axis='x', rotation=45)
+    
+    # Seasonality
+    axes[1, 1].bar(seasonal_volume.index, seasonal_volume/1e6)
+    axes[1, 1].set_title('Seasonal Pattern (Avg Volume by Month)')
+    axes[1, 1].set_xlabel('Month')
+    axes[1, 1].set_ylabel('Average Volume ($M)')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return monthly_stats
+
+# ============================================================================
+# STEP 5: CUSTOMER SEGMENTATION ANALYSIS
+# ============================================================================
+
+def analyze_customer_segments(df):
+    """
+    Deep dive into customer segmentation
+    """
+    print("\n" + "="*60)
+    print("CUSTOMER SEGMENTATION ANALYSIS")
+    print("="*60)
+    
+    # Calculate customer metrics
+    customer_metrics = df.groupby('Customer Name').agg({
+        'Amount': [
+            lambda x: x.abs().sum(),  # Total volume
+            'count',  # Trade count
+            lambda x: x.abs().mean(),  # Avg trade size
+            lambda x: (x > 0).sum() / len(x)  # Buy ratio
+        ],
+        'Date': ['min', 'max'],
+        'Customer Industry': 'first',
+        'Security Type': lambda x: x.mode()[0] if not x.empty else None  # Favorite security
+    })
+    
+    customer_metrics.columns = ['Total_Volume', 'Trade_Count', 'Avg_Trade_Size', 'Buy_Ratio',
+                                'First_Trade', 'Last_Trade', 'Industry', 'Favorite_Security']
+    
+    # Calculate customer lifetime
+    customer_metrics['Customer_Lifetime_Days'] = (
+        customer_metrics['Last_Trade'] - customer_metrics['First_Trade']
+    ).dt.days
+    
+    # Segment customers
+    def segment_customer(volume):
+        if volume > 10_000_000:
+            return 'VIP (>$10M)'
+        elif volume > 1_000_000:
+            return 'High Value ($1M-$10M)'
+        elif volume > 100_000:
+            return 'Medium ($100K-$1M)'
         else:
-            continue
-        
-        y_offset = abs(did_val) * 0.15 + 20
-        y_annotation = did_val + y_offset if did_val >= 0 else did_val - y_offset
-        
-        annotations.append(
-            dict(
-                x=ind_name, y=y_annotation, text=f'<b>{marker}</b>',
-                showarrow=False, font=dict(color='black', size=16),
-                xref='x2', yref='y2'
-            )
-        )
+            return 'Small (<$100K)'
     
-    # Add all annotations at once
-    fig.update_layout(annotations=annotations)
+    customer_metrics['Segment'] = customer_metrics['Total_Volume'].apply(segment_customer)
     
-    # Update layout
-    fig.update_layout(
-        title=dict(
-            text='<b>Tariff Impact Analysis: Industries</b>',
-            x=0.5,
-            font=dict(size=20, color=colors['text'])
-        ),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.3,
-            xanchor="center",
-            x=0.25
-        ),
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(size=12, color=colors['text']),
-        height=600,
-        width=1400
+    # Segment statistics
+    segment_stats = customer_metrics.groupby('Segment').agg({
+        'Total_Volume': ['count', 'sum', 'mean'],
+        'Trade_Count': 'mean',
+        'Avg_Trade_Size': 'mean',
+        'Buy_Ratio': 'mean'
+    })
+    
+    print("\nCustomer Segment Distribution:")
+    print(segment_stats)
+    
+    # Top customers
+    top_10 = customer_metrics.nlargest(10, 'Total_Volume')
+    print("\nTop 10 Customers:")
+    print(top_10[['Total_Volume', 'Trade_Count', 'Industry', 'Segment']])
+    
+    # Visualize
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Segment distribution
+    segment_counts = customer_metrics['Segment'].value_counts()
+    axes[0, 0].pie(segment_counts.values, labels=segment_counts.index, autopct='%1.1f%%')
+    axes[0, 0].set_title('Customer Distribution by Segment')
+    
+    # Volume by segment
+    segment_volume = customer_metrics.groupby('Segment')['Total_Volume'].sum()
+    axes[0, 1].pie(segment_volume.values, labels=segment_volume.index, autopct='%1.1f%%')
+    axes[0, 1].set_title('Volume Distribution by Segment')
+    
+    # Industry distribution
+    industry_volume = customer_metrics.groupby('Industry')['Total_Volume'].sum().sort_values(ascending=False)
+    axes[1, 0].bar(industry_volume.index, industry_volume/1e6)
+    axes[1, 0].set_title('Total Volume by Industry')
+    axes[1, 0].set_ylabel('Volume ($M)')
+    axes[1, 0].tick_params(axis='x', rotation=45)
+    
+    # Customer lifetime vs volume
+    axes[1, 1].scatter(customer_metrics['Customer_Lifetime_Days'], 
+                      customer_metrics['Total_Volume']/1e6,
+                      alpha=0.5)
+    axes[1, 1].set_xlabel('Customer Lifetime (Days)')
+    axes[1, 1].set_ylabel('Total Volume ($M)')
+    axes[1, 1].set_title('Customer Lifetime vs Trading Volume')
+    axes[1, 1].set_yscale('log')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return customer_metrics
+
+# ============================================================================
+# STEP 6: PRODUCT (SECURITY TYPE) ANALYSIS
+# ============================================================================
+
+def analyze_products(df):
+    """
+    Analyze trading patterns by security type
+    """
+    print("\n" + "="*60)
+    print("PRODUCT ANALYSIS")
+    print("="*60)
+    
+    # Security type metrics
+    security_stats = df.groupby('Security Type').agg({
+        'Amount': [
+            lambda x: x.abs().sum(),
+            'count',
+            lambda x: x.abs().mean(),
+            lambda x: x.abs().std()
+        ],
+        'Customer Name': 'nunique'
+    })
+    
+    security_stats.columns = ['Total_Volume', 'Trade_Count', 'Avg_Trade', 'Std_Trade', 'Unique_Customers']
+    security_stats['Volume_Share'] = security_stats['Total_Volume'] / security_stats['Total_Volume'].sum()
+    
+    print("\nSecurity Type Performance:")
+    print(security_stats.sort_values('Total_Volume', ascending=False))
+    
+    # Cross-product analysis
+    customer_products = df.groupby(['Customer Name', 'Security Type'])['Amount'].count().unstack(fill_value=0)
+    products_per_customer = (customer_products > 0).sum(axis=1)
+    
+    print(f"\nProduct Diversification:")
+    print(f"Average products per customer: {products_per_customer.mean():.2f}")
+    print(f"Customers using 1 product: {(products_per_customer == 1).sum()}")
+    print(f"Customers using 5+ products: {(products_per_customer >= 5).sum()}")
+    
+    # Time series by product
+    product_monthly = df.groupby([df['Date'].dt.to_period('M'), 'Security Type'])['Amount'].apply(
+        lambda x: x.abs().sum()
+    ).unstack(fill_value=0)
+    
+    # Visualize
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Volume by product
+    axes[0, 0].bar(security_stats.index, security_stats['Total_Volume']/1e6)
+    axes[0, 0].set_title('Total Volume by Security Type')
+    axes[0, 0].set_ylabel('Volume ($M)')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    
+    # Customer penetration
+    axes[0, 1].bar(security_stats.index, security_stats['Unique_Customers'])
+    axes[0, 1].set_title('Customer Count by Security Type')
+    axes[0, 1].set_ylabel('Unique Customers')
+    axes[0, 1].tick_params(axis='x', rotation=45)
+    
+    # Product trends
+    for col in product_monthly.columns[:3]:  # Top 3 products
+        axes[1, 0].plot(product_monthly.index.astype(str), product_monthly[col]/1e6, label=col)
+    axes[1, 0].set_title('Top 3 Products - Monthly Trend')
+    axes[1, 0].set_ylabel('Volume ($M)')
+    axes[1, 0].legend()
+    axes[1, 0].tick_params(axis='x', rotation=45)
+    
+    # Product correlation heatmap
+    product_corr = product_monthly.corr()
+    sns.heatmap(product_corr, annot=True, fmt='.2f', cmap='coolwarm', ax=axes[1, 1])
+    axes[1, 1].set_title('Product Correlation Matrix')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return security_stats
+
+# ============================================================================
+# STEP 7: BEHAVIORAL ANALYSIS
+# ============================================================================
+
+def analyze_trading_behavior(df):
+    """
+    Analyze trading behaviors and patterns
+    """
+    print("\n" + "="*60)
+    print("BEHAVIORAL ANALYSIS")
+    print("="*60)
+    
+    # Day of week analysis
+    df['DayOfWeek'] = df['Date'].dt.day_name()
+    df['WeekOfMonth'] = (df['Date'].dt.day - 1) // 7 + 1
+    
+    dow_stats = df.groupby('DayOfWeek').agg({
+        'Amount': [lambda x: x.abs().sum(), 'count'],
+        'Customer Name': 'nunique'
+    })
+    dow_stats.columns = ['Volume', 'Trade_Count', 'Active_Customers']
+    
+    # Reorder days
+    day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+    dow_stats = dow_stats.reindex(day_order)
+    
+    print("\nTrading by Day of Week:")
+    print(dow_stats)
+    
+    # Buy/Sell patterns by customer segment
+    customer_volume = df.groupby('Customer Name')['Amount'].apply(lambda x: x.abs().sum())
+    df['Customer_Segment'] = df['Customer Name'].map(
+        lambda x: 'VIP' if customer_volume[x] > 10_000_000 else 'Regular'
     )
     
-    # Update axes
-    fig.update_xaxes(title_text="Industry", row=1, col=1, tickangle=45)
-    fig.update_xaxes(title_text="Industry", row=1, col=2, tickangle=45)
-    fig.update_yaxes(title_text="Net Buy (Thousands $)", row=1, col=1)
-    fig.update_yaxes(title_text="DiD Effect (Thousands $)", row=1, col=2)
+    segment_behavior = df.groupby(['Customer_Segment', 'Investment'])['Amount'].agg(['count', 'mean'])
+    print("\nBuy/Sell Behavior by Customer Segment:")
+    print(segment_behavior)
     
-    # Save as high-quality image
-    print("Saving industry chart...")
-    fig.write_image("industry_analysis.png", width=1400, height=600, scale=2)
-    fig.show()
+    # Market timing analysis
+    df['Hour'] = pd.to_datetime(df['Date']).dt.hour  # If time data available
+    df['MonthDay'] = df['Date'].dt.day
+    
+    # Month-end effect
+    month_end_volume = df[df['MonthDay'] >= 25].groupby('MonthDay')['Amount'].apply(lambda x: x.abs().sum())
+    regular_day_volume = df[df['MonthDay'] < 25]['Amount'].abs().mean() * len(df[df['MonthDay'] < 25]) / 20
+    
+    print(f"\nMonth-end Effect:")
+    print(f"Last 5 days volume: ${month_end_volume.sum():,.0f}")
+    print(f"Expected volume (if normal): ${regular_day_volume * 5:,.0f}")
+    print(f"Month-end boost: {(month_end_volume.sum() / (regular_day_volume * 5) - 1) * 100:.1f}%")
+    
+    # Visualize
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Day of week patterns
+    axes[0, 0].bar(dow_stats.index, dow_stats['Volume']/1e6)
+    axes[0, 0].set_title('Trading Volume by Day of Week')
+    axes[0, 0].set_ylabel('Volume ($M)')
+    
+    # Buy/Sell ratio by segment
+    segment_buy_ratio = df.groupby(['Customer_Segment', 'Investment']).size().unstack()
+    segment_buy_ratio_pct = segment_buy_ratio.div(segment_buy_ratio.sum(axis=1), axis=0) * 100
+    segment_buy_ratio_pct.plot(kind='bar', ax=axes[0, 1])
+    axes[0, 1].set_title('Buy/Sell Distribution by Customer Segment')
+    axes[0, 1].set_ylabel('Percentage (%)')
+    
+    # Monthly pattern
+    monthly_pattern = df.groupby('MonthDay')['Amount'].apply(lambda x: x.abs().sum())
+    axes[1, 0].plot(monthly_pattern.index, monthly_pattern/1e6)
+    axes[1, 0].axvline(x=25, color='r', linestyle='--', alpha=0.5, label='Month-end starts')
+    axes[1, 0].set_title('Daily Volume Pattern within Month')
+    axes[1, 0].set_xlabel('Day of Month')
+    axes[1, 0].set_ylabel('Volume ($M)')
+    axes[1, 0].legend()
+    
+    # Net flow patterns
+    daily_net_flow = df.groupby('Date')['Amount'].sum()
+    axes[1, 1].plot(daily_net_flow.index, daily_net_flow.rolling(20).mean()/1e6)
+    axes[1, 1].axhline(y=0, color='r', linestyle='-', alpha=0.5)
+    axes[1, 1].set_title('20-Day Moving Average Net Flow')
+    axes[1, 1].set_ylabel('Net Flow ($M)')
+    
+    plt.tight_layout()
+    plt.show()
 
-else:
-    print("No significant industry changes found for visualization")
+# ============================================================================
+# STEP 8: ADVANCED ANALYTICS - CLUSTERING & PREDICTIONS
+# ============================================================================
 
-# --- Summary Stats for Charts ---
-print("\n=== CHART SUMMARY ===")
-if len(sec_significant) > 0:
-    print(f"Security Types Chart: {len(sec_plot_data)} significant types visualized")
-    print("Security types with largest impacts:")
-    for _, row in sec_plot_data.head(3).iterrows():
-        print(f"  - {row['Security_Type']}: {row['Pct_Change']:+.1f}% change, DiD: ${row['DiD_Effect_Mean']:,.0f}")
+def advanced_analytics(df, customer_metrics):
+    """
+    Advanced analytics including clustering and predictive insights
+    """
+    print("\n" + "="*60)
+    print("ADVANCED ANALYTICS")
+    print("="*60)
+    
+    # Prepare data for clustering
+    clustering_features = ['Total_Volume', 'Trade_Count', 'Avg_Trade_Size', 'Buy_Ratio']
+    X = customer_metrics[clustering_features].copy()
+    
+    # Log transform for better clustering
+    X['Total_Volume'] = np.log1p(X['Total_Volume'])
+    X['Trade_Count'] = np.log1p(X['Trade_Count'])
+    X['Avg_Trade_Size'] = np.log1p(X['Avg_Trade_Size'])
+    
+    # Standardize
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # K-means clustering
+    kmeans = KMeans(n_clusters=4, random_state=42)
+    customer_metrics['Cluster'] = kmeans.fit_predict(X_scaled)
+    
+    # Analyze clusters
+    cluster_profiles = customer_metrics.groupby('Cluster')[clustering_features].agg(['mean', 'std'])
+    print("\nCustomer Cluster Profiles:")
+    print(cluster_profiles)
+    
+    # PCA for visualization
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    
+    # Risk concentration analysis
+    customer_concentration = df.groupby(['Customer Name', 'Security Type'])['Amount'].apply(
+        lambda x: x.abs().sum()
+    ).unstack(fill_value=0)
+    
+    # Calculate Herfindahl index for each customer
+    def herfindahl_index(row):
+        total = row.sum()
+        if total == 0:
+            return 0
+        shares = row / total
+        return (shares ** 2).sum()
+    
+    customer_metrics['Concentration_Risk'] = customer_concentration.apply(herfindahl_index, axis=1)
+    
+    # Identify at-risk customers
+    high_risk_customers = customer_metrics[customer_metrics['Concentration_Risk'] > 0.5]
+    print(f"\nHigh Concentration Risk Customers: {len(high_risk_customers)}")
+    print(high_risk_customers[['Total_Volume', 'Concentration_Risk', 'Favorite_Security']].head())
+    
+    # Churn prediction indicators
+    # Simple rule-based approach (in practice, use ML models)
+    last_trade_days_ago = (pd.Timestamp.now() - customer_metrics['Last_Trade']).dt.days
+    avg_days_between_trades = customer_metrics['Customer_Lifetime_Days'] / customer_metrics['Trade_Count']
+    
+    customer_metrics['Days_Since_Last_Trade'] = last_trade_days_ago
+    customer_metrics['Churn_Risk'] = last_trade_days_ago > (2 * avg_days_between_trades)
+    
+    print(f"\nCustomers at Churn Risk: {customer_metrics['Churn_Risk'].sum()}")
+    
+    # Visualize
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # PCA visualization
+    scatter = axes[0, 0].scatter(X_pca[:, 0], X_pca[:, 1], 
+                                c=customer_metrics['Cluster'], 
+                                cmap='viridis', alpha=0.6)
+    axes[0, 0].set_title('Customer Clusters (PCA)')
+    axes[0, 0].set_xlabel('First Principal Component')
+    axes[0, 0].set_ylabel('Second Principal Component')
+    plt.colorbar(scatter, ax=axes[0, 0])
+    
+    # Concentration risk distribution
+    axes[0, 1].hist(customer_metrics['Concentration_Risk'], bins=30, edgecolor='black')
+    axes[0, 1].axvline(x=0.5, color='r', linestyle='--', label='High Risk Threshold')
+    axes[0, 1].set_title('Portfolio Concentration Risk Distribution')
+    axes[0, 1].set_xlabel('Herfindahl Index')
+    axes[0, 1].set_ylabel('Customer Count')
+    axes[0, 1].legend()
+    
+    # Cluster characteristics
+    cluster_volumes = customer_metrics.groupby('Cluster')['Total_Volume'].mean()
+    axes[1, 0].bar(cluster_volumes.index, cluster_volumes/1e6)
+    axes[1, 0].set_title('Average Volume by Customer Cluster')
+    axes[1, 0].set_xlabel('Cluster')
+    axes[1, 0].set_ylabel('Average Volume ($M)')
+    
+    # Churn risk by segment
+    churn_by_segment = customer_metrics.groupby('Segment')['Churn_Risk'].agg(['sum', 'count'])
+    churn_by_segment['Churn_Rate'] = churn_by_segment['sum'] / churn_by_segment['count'] * 100
+    axes[1, 1].bar(churn_by_segment.index, churn_by_segment['Churn_Rate'])
+    axes[1, 1].set_title('Churn Risk by Customer Segment')
+    axes[1, 1].set_ylabel('Churn Risk Rate (%)')
+    axes[1, 1].tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return customer_metrics
 
-if len(ind_significant) > 0:
-    print(f"\nIndustry Chart: {len(ind_plot_data)} significant industries visualized")
-    print("Industries with largest impacts:")
-    for _, row in ind_plot_data.head(3).iterrows():
-        print(f"  - {row['Industry'][:30]}: {row['Pct_Change']:+.1f}% change, DiD: ${row['DiD_Effect_Mean']:,.0f}")
+# ============================================================================
+# STEP 9: GENERATE ACTIONABLE INSIGHTS
+# ============================================================================
 
-print("\nChart files saved:")
-print("- security_type_analysis.png (Professional Plotly chart)")
-print("- industry_analysis.png (Professional Plotly chart)")
-print("\nSignificance markers: *** p<0.001, ** p<0.01, * p<0.05")
+def generate_rm_insights(df, metrics, customer_metrics):
+    """
+    Generate specific actionable insights for RMs
+    """
+    print("\n" + "="*60)
+    print("ACTIONABLE INSIGHTS FOR RELATIONSHIP MANAGERS")
+    print("="*60)
+    
+    # 1. VIP Customer Actions
+    vip_customers = customer_metrics[customer_metrics['Segment'] == 'VIP (>$10M)']
+    print("\n1. VIP CUSTOMER MANAGEMENT:")
+    print(f"   - Total VIP customers: {len(vip_customers)}")
+    print(f"   - VIP customers at churn risk: {vip_customers['Churn_Risk'].sum()}")
+    print("   - ACTION: Schedule immediate meetings with these VIP customers:")
+    for idx, customer in vip_customers[vip_customers['Churn_Risk']].iterrows():
+        print(f"     * {idx}: Last trade {customer['Days_Since_Last_Trade']} days ago")
+    
+    # 2. Cross-selling opportunities
+    single_product_customers = customer_metrics[
+        df.groupby('Customer Name')['Security Type'].nunique() == 1
+    ]
+    high_value_single_product = single_product_customers[
+        single_product_customers['Total_Volume'] > 1_000_000
+    ]
+    
+    print("\n2. CROSS-SELLING OPPORTUNITIES:")
+    print(f"   - High-value customers using only 1 product: {len(high_value_single_product)}")
+    print("   - Top targets for product diversification:")
+    for idx, customer in high_value_single_product.head(5).iterrows():
+        print(f"     * {idx}: Currently only trades {customer['Favorite_Security']}")
+    
+    # 3. Industry focus
+    industry_growth = df.groupby([df['Date'].dt.to_period('Q'), 'Customer Industry'])['Amount'].sum()
+    latest_quarter = industry_growth.index.get_level_values(0).max()
+    previous_quarter = latest_quarter - 1
+    
+    growth_rates = {}
+    for industry in df['Customer Industry'].unique():
+        if (previous_quarter, industry) in industry_growth and (latest_quarter, industry) in industry_growth:
+            prev_val = industry_growth[(previous_quarter, industry)]
+            curr_val = industry_growth[(latest_quarter, industry)]
+            growth_rates[industry] = (curr_val - prev_val) / abs(prev_val) * 100
+    
+    print("\n3. INDUSTRY FOCUS AREAS:")
+    sorted_growth = sorted(growth_rates.items(), key=lambda x: x[1], reverse=True)
+    print("   - Fastest growing industries (QoQ):")
+    for industry, growth in sorted_growth[:3]:
+        print(f"     * {industry}: {growth:.1f}% growth")
+    
+    # 4. Risk management
+    high_concentration = customer_metrics[customer_metrics['Concentration_Risk'] > 0.7]
+    print("\n4. RISK MANAGEMENT ALERTS:")
+    print(f"   - Customers with extreme concentration (>70%): {len(high_concentration)}")
+    print("   - ACTION: Discuss diversification with these customers")
+    
+    # 5. Seasonal preparation
+    current_month = pd.Timestamp.now().month
+    next_month = (current_month % 12) + 1
+    
+    monthly_avg = df.groupby(df['Date'].dt.month)['Amount'].apply(lambda x: x.abs().sum()).mean()
+    next_month_historical = df[df['Date'].dt.month == next_month]['Amount'].abs().sum() / 2  # 2 years
+    
+    print("\n5. SEASONAL PREPARATION:")
+    print(f"   - Next month ({next_month}) historical average: ${next_month_historical:,.0f}")
+    print(f"   - vs. overall monthly average: ${monthly_avg:,.0f}")
+    if next_month_historical > monthly_avg * 1.1:
+        print("   - ACTION: Prepare for high-volume month - ensure liquidity and staff coverage")
+    
+    # 6. Product recommendations
+    print("\n6. PRODUCT STRATEGY:")
+    # Find products with growing adoption
+    product_customer_growth = df.groupby([
+        df['Date'].dt.to_period('Q'), 
+        'Security Type'
+    ])['Customer Name'].nunique()
+    
+    for security_type in df['Security Type'].unique():
+        if (latest_quarter, security_type) in product_customer_growth:
+            curr_customers = product_customer_growth[(latest_quarter, security_type)]
+            if (previous_quarter, security_type) in product_customer_growth:
+                prev_customers = product_customer_growth[(previous_quarter, security_type)]
+                growth = (curr_customers - prev_customers) / prev_customers * 100
+                if growth > 10:
+                    print(f"   - {security_type}: {growth:.1f}% customer growth - promote actively")
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def main():
+    """
+    Main execution function
+    """
+    # Generate data
+    df = generate_dummy_trade_data(400000)
+    
+    # Save sample data
+    df.head(1000).to_csv('banking_trade_sample.csv', index=False)
+    print("\nSample data saved to 'banking_trade_sample.csv'")
+    
+    # Run analyses
+    df = explore_data(df)
+    metrics = calculate_key_metrics(df)
+    monthly_stats = analyze_time_series(df)
+    customer_metrics = analyze_customer_segments(df)
+    security_stats = analyze_products(df)
+    analyze_trading_behavior(df)
+    customer_metrics = advanced_analytics(df, customer_metrics)
+    generate_rm_insights(df, metrics, customer_metrics)
+    
+    print("\n" + "="*60)
+    print("ANALYSIS COMPLETE")
+    print("="*60)
+    
+    return df, metrics, customer_metrics
+
+if __name__ == "__main__":
+    # Run the complete analysis
+    df, metrics, customer_metrics = main()
+    
+    # Additional ad-hoc analysis can be performed here
+    print("\nData is now available in variables: df, metrics, customer_metrics")
+    print("You can perform additional analysis as needed!")
