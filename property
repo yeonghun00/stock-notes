@@ -60,11 +60,10 @@ class Property:
     url: str
     property_id: str
     
-    # Location hierarchy
-    region: Optional[str] = None  # New Territories, Hong Kong Island, Kowloon
-    district: Optional[str] = None  # Fanling, Shatin, etc.
-    estate_name: Optional[str] = None  # Wing Fai Centre, City One, etc.
-    full_address: Optional[str] = None  # Complete address
+    # Location hierarchy from breadcrumb
+    location_breadcrumb: Optional[str] = None  # e.g., "Islands/Tung Chung/Seaview Crescent"
+    estate_name: Optional[str] = None  # Estate name from breadcrumb or table
+    full_address: Optional[str] = None  # Complete address from table
     
     # Property identification
     block_unit: Optional[str] = None
@@ -75,14 +74,6 @@ class Property:
     sell_price_millions: Optional[float] = None  # Numeric value
     valuation: Optional[str] = None
     valuation_millions: Optional[float] = None
-    
-    # Mortgage information
-    mortgage_monthly_payment: Optional[str] = None
-    mortgage_monthly_amount: Optional[int] = None  # Numeric value
-    initial_payment: Optional[str] = None
-    mortgage_ratio: Optional[str] = None
-    interest_rate: Optional[str] = None
-    mortgage_years: Optional[str] = None
     
     # Area information (separated)
     gross_area_sqft: Optional[int] = None
@@ -106,17 +97,24 @@ class Property:
     scraped_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
 class PropertyScraper:
-    def __init__(self, use_selenium=False, max_concurrent=5, delay=1.0):
+    def __init__(self, use_selenium=False, max_concurrent=5, delay=1.0, 
+                 verify_ssl=True, proxy=None, timeout=30):
         """
         Initialize scraper
         Args:
             use_selenium: Use Selenium for JS-heavy pages (slower but more reliable)
             max_concurrent: Max concurrent requests (for async mode)
             delay: Delay between requests in seconds
+            verify_ssl: Whether to verify SSL certificates (False for corporate servers)
+            proxy: Proxy URL if needed (e.g., 'http://proxy.company.com:8080')
+            timeout: Request timeout in seconds
         """
         self.use_selenium = use_selenium
         self.max_concurrent = max_concurrent
         self.delay = delay
+        self.verify_ssl = verify_ssl
+        self.proxy = proxy
+        self.timeout = timeout
         self.session = None
         self.driver = None
         
@@ -130,22 +128,58 @@ class PropertyScraper:
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
             
+            # Add proxy for Selenium if provided
+            if proxy:
+                chrome_options.add_argument(f'--proxy-server={proxy}')
+            
             self.driver = webdriver.Chrome(options=chrome_options)
     
     async def fetch_page(self, url: str) -> str:
-        """Fetch page content using aiohttp"""
+        """Fetch page content using aiohttp with corporate server support"""
         if not self.session:
-            self.session = aiohttp.ClientSession(headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
+            # Configure SSL context
+            ssl_context = None
+            if not self.verify_ssl:
+                import ssl
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            
+            # Configure timeout
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            
+            # Configure connector with SSL settings
+            connector = aiohttp.TCPConnector(
+                ssl=ssl_context,
+                limit=100,  # Connection pool size
+                ttl_dns_cache=300
+            )
+            
+            # Create session with all configurations
+            self.session = aiohttp.ClientSession(
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
+                connector=connector,
+                timeout=timeout
+            )
         
         try:
-            async with self.session.get(url) as response:
+            # Make request with proxy if provided
+            async with self.session.get(
+                url, 
+                proxy=self.proxy,
+                ssl=False if not self.verify_ssl else None
+            ) as response:
                 if response.status == 200:
+                    # Read response (streaming is automatic in aiohttp)
                     return await response.text()
                 else:
                     logger.error(f"Failed to fetch {url}: Status {response.status}")
                     return None
+        except aiohttp.ClientError as e:
+            logger.error(f"Client error fetching {url}: {str(e)}")
+            return None
         except Exception as e:
             logger.error(f"Error fetching {url}: {str(e)}")
             return None
@@ -183,36 +217,67 @@ class PropertyScraper:
                 return value / 1_000_000
         return None
     
-    def extract_location_info(self, soup: BeautifulSoup) -> Tuple[str, str, str]:
-        """Extract region, district, and estate name from the page header"""
-        # Look for breadcrumb or header structure
-        breadcrumb = soup.find('nav', class_='breadcrumb') or soup.find('div', class_='property-location')
+    def extract_breadcrumb_location(self, soup: BeautifulSoup) -> Tuple[str, str]:
+        """Extract location from breadcrumb navigation"""
+        # Try different breadcrumb selectors
+        breadcrumb = (
+            soup.find('div', class_='c_breadcrumb') or 
+            soup.find('div', class_='ui c_breadcrumb container') or
+            soup.find('nav', class_='breadcrumb') or
+            soup.find('div', {'class': re.compile(r'breadcrumb', re.I)})
+        )
         
-        region, district, estate = None, None, None
-        
-        # Try to find location info in the page header/title area
-        header_area = soup.find('div', class_='property-header') or soup.find('h1')
-        if header_area:
-            # Look for pattern like "New Territories > Fanling > Wing Fai Centre"
-            location_text = header_area.get_text(strip=True)
+        if breadcrumb:
+            # Get all text from breadcrumb
+            breadcrumb_text = breadcrumb.get_text(' ', strip=True)
             
-            # Common regions
-            regions = ['New Territories', 'Hong Kong Island', 'Kowloon']
-            for r in regions:
-                if r in location_text:
-                    region = r
-                    # Extract what comes after region
-                    parts = location_text.split(r)[-1].split()
-                    if parts:
-                        # Next word is usually district
-                        district = parts[0].strip(',')
-                        # Rest might be estate name
-                        estate_parts = parts[1:]
-                        if estate_parts:
-                            estate = ' '.join(estate_parts).strip(',')
-                    break
+            # Remove unwanted parts
+            exclude = ['Home', 'Buy Property', 'Property Info', 'Buy', 'Property', 'Sell']
+            
+            # Split by common separators
+            parts = re.split(r'[>›/]|\s{2,}', breadcrumb_text)
+            filtered_parts = []
+            
+            for part in parts:
+                part = part.strip()
+                if part and part not in exclude and len(part) > 1:
+                    # Also filter out if it's just numbers (like property ID)
+                    if not part.isdigit():
+                        filtered_parts.append(part)
+            
+            if filtered_parts:
+                # Join with / separator
+                location = '/'.join(filtered_parts)
+                # Estate name is usually the last meaningful item
+                estate = filtered_parts[-1] if filtered_parts else None
+                return location, estate
         
-        return region, district, estate
+        return None, None
+    
+    def _extract_value_from_row(self, element) -> str:
+        """Helper to extract value from table row"""
+        # Try to find the parent row and get the next cell
+        if hasattr(element, 'find_parent'):
+            parent = element.find_parent('tr') or element.find_parent('td')
+            if parent:
+                if parent.name == 'td':
+                    next_cell = parent.find_next_sibling('td')
+                    if next_cell:
+                        return next_cell.get_text(strip=True)
+                elif parent.name == 'tr':
+                    cells = parent.find_all('td')
+                    if len(cells) >= 2:
+                        return cells[1].get_text(strip=True)
+        
+        # For NavigableString objects
+        elif hasattr(element, 'parent'):
+            parent = element.parent
+            if parent and parent.name == 'td':
+                next_cell = parent.find_next_sibling('td')
+                if next_cell:
+                    return next_cell.get_text(strip=True)
+        
+        return ""
     
     def parse_property_page(self, html: str, url: str) -> Tuple[Property, List[str]]:
         """Parse individual property page with improved extraction"""
@@ -223,15 +288,17 @@ class PropertyScraper:
             property_id=self.extract_property_id(url)
         )
         
-        # Extract location hierarchy from page structure
-        region, district, estate = self.extract_location_info(soup)
-        property_obj.region = region
-        property_obj.district = district
+        # Extract location from breadcrumb
+        location_breadcrumb, estate_from_breadcrumb = self.extract_breadcrumb_location(soup)
+        property_obj.location_breadcrumb = location_breadcrumb
         
-        # Look for estate name in specific patterns
-        # Pattern 1: In the table
+        # Set estate name from breadcrumb first
+        if estate_from_breadcrumb:
+            property_obj.estate_name = estate_from_breadcrumb
+        
+        # Look for estate name in table as fallback
         estate_row = soup.find('td', text=re.compile(r'Estate'))
-        if estate_row:
+        if estate_row and not property_obj.estate_name:
             estate_info = estate_row.find_next_sibling('td')
             if estate_info:
                 estate_text = estate_info.get_text(strip=True)
@@ -245,16 +312,6 @@ class PropertyScraper:
                 if block_match:
                     property_obj.block_unit = f"Block {block_match.group(1)}"
         
-        # Pattern 2: Look for estate name in page title or headers
-        if not property_obj.estate_name:
-            title = soup.find('title')
-            if title:
-                title_text = title.get_text()
-                # Extract estate name from patterns like "Wing Fai Centre Property"
-                estate_match = re.search(r'([A-Z][^,]+?)\s*(?:Property|Buy|Sell|$)', title_text)
-                if estate_match:
-                    property_obj.estate_name = estate_match.group(1).strip()
-        
         # Extract full address
         address_row = soup.find('td', text='Address')
         if address_row:
@@ -262,89 +319,130 @@ class PropertyScraper:
             if address_info:
                 property_obj.full_address = address_info.get_text(strip=True)
         
-        # Extract price information with numeric conversion
-        sell_price_row = soup.find(text=re.compile(r'Sell Price|Sell HKD\$'))
-        if sell_price_row:
-            price_text = self._extract_value_from_row(sell_price_row)
-            property_obj.sell_price = price_text
-            property_obj.sell_price_millions = self.parse_price_to_millions(price_text)
+        # Extract price information - Multiple methods to ensure we get it
+        # Method 1: Look for table row with td tag
+        sell_price_td = soup.find('td', text=re.compile(r'Sell\s*Price'))
+        if sell_price_td:
+            price_cell = sell_price_td.find_next_sibling('td')
+            if price_cell:
+                price_text = price_cell.get_text(strip=True)
+                property_obj.sell_price = price_text
+                property_obj.sell_price_millions = self.parse_price_to_millions(price_text)
+        
+        # Method 2: Try with text search if td search fails
+        if not property_obj.sell_price:
+            sell_price_elem = soup.find(text=re.compile(r'Sell\s*Price'))
+            if sell_price_elem:
+                price_text = self._extract_value_from_row(sell_price_elem)
+                if price_text:
+                    property_obj.sell_price = price_text
+                    property_obj.sell_price_millions = self.parse_price_to_millions(price_text)
+        
+        # Method 3: Look for price in page text if still not found
+        if not property_obj.sell_price:
+            page_text = soup.get_text()
+            price_patterns = [
+                r'Sell\s*(?:Price:?\s*)?HKD\$?([\d.,]+\s*(?:M|Million|Millions))',
+                r'Price[:\s]+HKD\$?([\d.,]+\s*(?:M|Million|Millions))',
+                r'HKD\$?([\d.,]+\s*(?:M|Million|Millions))'
+            ]
+            
+            for pattern in price_patterns:
+                price_match = re.search(pattern, page_text, re.IGNORECASE)
+                if price_match:
+                    property_obj.sell_price = f"HKD${price_match.group(1)}"
+                    property_obj.sell_price_millions = self.parse_price_to_millions(price_match.group(1))
+                    break
         
         # Extract valuation
-        valuation_row = soup.find(text=re.compile(r'Valuation'))
-        if valuation_row:
-            val_text = self._extract_value_from_row(valuation_row)
-            property_obj.valuation = val_text
-            property_obj.valuation_millions = self.parse_price_to_millions(val_text)
-        
-        # Extract mortgage information
-        mortgage_row = soup.find(text=re.compile(r'Mortgage Monthly Repayment'))
-        if mortgage_row:
-            mortgage_text = self._extract_value_from_row(mortgage_row)
-            property_obj.mortgage_monthly_payment = mortgage_text
-            # Extract numeric value
-            amount_match = re.search(r'HKD\$?([\d,]+)', mortgage_text)
-            if amount_match:
-                property_obj.mortgage_monthly_amount = int(amount_match.group(1).replace(',', ''))
+        valuation_td = soup.find('td', text=re.compile(r'Valuation'))
+        if valuation_td:
+            val_cell = valuation_td.find_next_sibling('td')
+            if val_cell:
+                val_text = val_cell.get_text(strip=True)
+                property_obj.valuation = val_text
+                property_obj.valuation_millions = self.parse_price_to_millions(val_text)
+        else:
+            valuation_elem = soup.find(text=re.compile(r'Valuation'))
+            if valuation_elem:
+                val_text = self._extract_value_from_row(valuation_elem)
+                if val_text:
+                    property_obj.valuation = val_text
+                    property_obj.valuation_millions = self.parse_price_to_millions(val_text)
         
         # Extract area information with separated values
-        gross_area_row = soup.find(text=re.compile(r'Gross Area'))
-        if gross_area_row:
-            area_text = self._extract_value_from_row(gross_area_row)
-            # Extract sqft
-            sqft_match = re.search(r'(\d+)\s*ft²', area_text)
-            if sqft_match:
-                property_obj.gross_area_sqft = int(sqft_match.group(1))
-            # Extract unit price
-            unit_price_match = re.search(r'@\s*([\d,]+)', area_text)
-            if unit_price_match:
-                property_obj.gross_area_unit_price = int(unit_price_match.group(1).replace(',', ''))
+        gross_area_td = soup.find('td', text=re.compile(r'Gross Area'))
+        if gross_area_td:
+            area_cell = gross_area_td.find_next_sibling('td')
+            if area_cell:
+                area_text = area_cell.get_text(strip=True)
+                # Extract sqft
+                sqft_match = re.search(r'(\d+)\s*ft²', area_text)
+                if sqft_match:
+                    property_obj.gross_area_sqft = int(sqft_match.group(1))
+                # Extract unit price
+                unit_price_match = re.search(r'@\s*([\d,]+)', area_text)
+                if unit_price_match:
+                    property_obj.gross_area_unit_price = int(unit_price_match.group(1).replace(',', ''))
         
-        saleable_area_row = soup.find(text=re.compile(r'Saleable Area'))
-        if saleable_area_row:
-            area_text = self._extract_value_from_row(saleable_area_row)
-            # Extract sqft
-            sqft_match = re.search(r'(\d+)\s*ft²', area_text)
-            if sqft_match:
-                property_obj.saleable_area_sqft = int(sqft_match.group(1))
-            # Extract unit price
-            unit_price_match = re.search(r'@\s*([\d,]+)', area_text)
-            if unit_price_match:
-                property_obj.saleable_area_unit_price = int(unit_price_match.group(1).replace(',', ''))
+        saleable_area_td = soup.find('td', text=re.compile(r'Saleable Area'))
+        if saleable_area_td:
+            area_cell = saleable_area_td.find_next_sibling('td')
+            if area_cell:
+                area_text = area_cell.get_text(strip=True)
+                # Extract sqft
+                sqft_match = re.search(r'(\d+)\s*ft²', area_text)
+                if sqft_match:
+                    property_obj.saleable_area_sqft = int(sqft_match.group(1))
+                # Extract unit price
+                unit_price_match = re.search(r'@\s*([\d,]+)', area_text)
+                if unit_price_match:
+                    property_obj.saleable_area_unit_price = int(unit_price_match.group(1).replace(',', ''))
         
         # Extract building age
-        age_row = soup.find(text=re.compile(r'Building age'))
-        if age_row:
-            age_text = self._extract_value_from_row(age_row)
-            age_match = re.search(r'(\d+)\s*Year', age_text)
-            if age_match:
-                property_obj.building_age_years = int(age_match.group(1))
+        age_td = soup.find('td', text=re.compile(r'Building age'))
+        if age_td:
+            age_cell = age_td.find_next_sibling('td')
+            if age_cell:
+                age_text = age_cell.get_text(strip=True)
+                age_match = re.search(r'(\d+)\s*Year', age_text)
+                if age_match:
+                    property_obj.building_age_years = int(age_match.group(1))
         
         # Extract floor info
-        floor_row = soup.find(text=re.compile(r'Floor zone'))
-        if floor_row:
-            property_obj.floor_info = self._extract_value_from_row(floor_row)
+        floor_td = soup.find('td', text=re.compile(r'Floor zone'))
+        if floor_td:
+            floor_cell = floor_td.find_next_sibling('td')
+            if floor_cell:
+                property_obj.floor_info = floor_cell.get_text(strip=True)
         
         # Extract rooms and bathrooms
-        rooms_row = soup.find(text=re.compile(r'Room and Bathroom'))
-        if rooms_row:
-            rooms_text = self._extract_value_from_row(rooms_row)
-            # Extract bedrooms
-            bed_match = re.search(r'(\d+)\s*Bedroom', rooms_text)
-            if bed_match:
-                property_obj.bedrooms = int(bed_match.group(1))
-            # Extract bathrooms if present
-            bath_match = re.search(r'(\d+)\s*Bathroom', rooms_text)
-            if bath_match:
-                property_obj.bathrooms = int(bath_match.group(1))
+        rooms_td = soup.find('td', text=re.compile(r'Room and Bathroom'))
+        if rooms_td:
+            rooms_cell = rooms_td.find_next_sibling('td')
+            if rooms_cell:
+                rooms_text = rooms_cell.get_text(strip=True)
+                # Extract bedrooms
+                bed_match = re.search(r'(\d+)\s*Bedroom', rooms_text)
+                if bed_match:
+                    property_obj.bedrooms = int(bed_match.group(1))
+                # Extract bathrooms if present
+                bath_match = re.search(r'(\d+)\s*Bathroom', rooms_text)
+                if bath_match:
+                    property_obj.bathrooms = int(bath_match.group(1))
         
         # Extract school networks
-        pri_school_row = soup.find(text=re.compile(r'Pri School Net'))
-        if pri_school_row:
-            property_obj.pri_school_net = self._extract_value_from_row(pri_school_row)
+        pri_school_td = soup.find('td', text=re.compile(r'Pri School Net'))
+        if pri_school_td:
+            school_cell = pri_school_td.find_next_sibling('td')
+            if school_cell:
+                property_obj.pri_school_net = school_cell.get_text(strip=True)
         
-        sec_school_row = soup.find(text=re.compile(r'Sec School Net'))
-        if sec_school_row:
-            property_obj.sec_school_net = self._extract_value_from_row(sec_school_row)
+        sec_school_td = soup.find('td', text=re.compile(r'Sec School Net'))
+        if sec_school_td:
+            school_cell = sec_school_td.find_next_sibling('td')
+            if school_cell:
+                property_obj.sec_school_net = school_cell.get_text(strip=True)
         
         # Find transaction links
         transaction_links = soup.find_all('a', href=re.compile(r'/transaction/deal-\d+'))
@@ -408,59 +506,90 @@ class PropertyScraper:
                     transaction.flat_info = ', '.join(flat_parts)
         
         # Extract location/address
-        address_elem = soup.find(text=re.compile(r'Address|Location'))
-        if address_elem:
-            location_text = self._extract_value_from_row(address_elem)
-            transaction.location = location_text
+        address_td = soup.find('td', text=re.compile(r'Address|Location'))
+        if address_td:
+            location_cell = address_td.find_next_sibling('td')
+            if location_cell:
+                transaction.location = location_cell.get_text(strip=True)
+        else:
+            # Try alternative method
+            address_elem = soup.find(text=re.compile(r'Address|Location'))
+            if address_elem:
+                location_text = self._extract_value_from_row(address_elem)
+                if location_text:
+                    transaction.location = location_text
         
         # Extract sold price
-        sold_price_elem = soup.find(text=re.compile(r'Sold Price'))
-        if sold_price_elem:
-            price_text = self._extract_value_from_row(sold_price_elem)
-            transaction.sold_price = price_text
-            transaction.sold_price_millions = self.parse_price_to_millions(price_text)
+        sold_price_td = soup.find('td', text=re.compile(r'Sold Price'))
+        if sold_price_td:
+            price_cell = sold_price_td.find_next_sibling('td')
+            if price_cell:
+                price_text = price_cell.get_text(strip=True)
+                transaction.sold_price = price_text
+                transaction.sold_price_millions = self.parse_price_to_millions(price_text)
+        else:
+            sold_price_elem = soup.find(text=re.compile(r'Sold Price'))
+            if sold_price_elem:
+                price_text = self._extract_value_from_row(sold_price_elem)
+                if price_text:
+                    transaction.sold_price = price_text
+                    transaction.sold_price_millions = self.parse_price_to_millions(price_text)
         
         # Extract registry date
-        date_elem = soup.find(text=re.compile(r'Registry Date'))
-        if date_elem:
-            transaction.registry_date = self._extract_value_from_row(date_elem)
+        date_td = soup.find('td', text=re.compile(r'Registry Date'))
+        if date_td:
+            date_cell = date_td.find_next_sibling('td')
+            if date_cell:
+                transaction.registry_date = date_cell.get_text(strip=True)
         
         # Extract areas
-        gross_elem = soup.find(text=re.compile(r'Gross area'))
-        if gross_elem:
-            area_text = self._extract_value_from_row(gross_elem)
-            sqft_match = re.search(r'(\d+)\s*ft²', area_text)
-            if sqft_match:
-                transaction.gross_area_sqft = int(sqft_match.group(1))
+        gross_td = soup.find('td', text=re.compile(r'Gross area'))
+        if gross_td:
+            area_cell = gross_td.find_next_sibling('td')
+            if area_cell:
+                area_text = area_cell.get_text(strip=True)
+                sqft_match = re.search(r'(\d+)\s*ft²', area_text)
+                if sqft_match:
+                    transaction.gross_area_sqft = int(sqft_match.group(1))
         
-        saleable_elem = soup.find(text=re.compile(r'Saleable area'))
-        if saleable_elem:
-            area_text = self._extract_value_from_row(saleable_elem)
-            sqft_match = re.search(r'(\d+)\s*ft²', area_text)
-            if sqft_match:
-                transaction.saleable_area_sqft = int(sqft_match.group(1))
+        saleable_td = soup.find('td', text=re.compile(r'Saleable area'))
+        if saleable_td:
+            area_cell = saleable_td.find_next_sibling('td')
+            if area_cell:
+                area_text = area_cell.get_text(strip=True)
+                sqft_match = re.search(r'(\d+)\s*ft²', area_text)
+                if sqft_match:
+                    transaction.saleable_area_sqft = int(sqft_match.group(1))
         
         # Extract unit prices
-        building_price_elem = soup.find(text=re.compile(r'Building Unit Price'))
-        if building_price_elem:
-            transaction.building_unit_price = self._extract_value_from_row(building_price_elem)
+        building_price_td = soup.find('td', text=re.compile(r'Building Unit Price'))
+        if building_price_td:
+            price_cell = building_price_td.find_next_sibling('td')
+            if price_cell:
+                transaction.building_unit_price = price_cell.get_text(strip=True)
         
-        unit_price_elem = soup.find(text=re.compile(r'Unit Price'))
-        if unit_price_elem and unit_price_elem != building_price_elem:
-            transaction.unit_price = self._extract_value_from_row(unit_price_elem)
+        unit_price_td = soup.find('td', text=re.compile(r'^Unit Price'))
+        if unit_price_td and unit_price_td != building_price_td:
+            price_cell = unit_price_td.find_next_sibling('td')
+            if price_cell:
+                transaction.unit_price = price_cell.get_text(strip=True)
         
         # Extract bedrooms
-        bedroom_elem = soup.find(text=re.compile(r'Bedroom'))
-        if bedroom_elem:
-            bedroom_text = self._extract_value_from_row(bedroom_elem)
-            bed_match = re.search(r'(\d+)', bedroom_text)
-            if bed_match:
-                transaction.bedrooms = int(bed_match.group(1))
+        bedroom_td = soup.find('td', text=re.compile(r'Bedroom'))
+        if bedroom_td:
+            bedroom_cell = bedroom_td.find_next_sibling('td')
+            if bedroom_cell:
+                bedroom_text = bedroom_cell.get_text(strip=True)
+                bed_match = re.search(r'(\d+)', bedroom_text)
+                if bed_match:
+                    transaction.bedrooms = int(bed_match.group(1))
         
         # Extract transaction format
-        format_elem = soup.find(text=re.compile(r'Transaction Format'))
-        if format_elem:
-            transaction.transaction_format = self._extract_value_from_row(format_elem)
+        format_td = soup.find('td', text=re.compile(r'Transaction Format'))
+        if format_td:
+            format_cell = format_td.find_next_sibling('td')
+            if format_cell:
+                transaction.transaction_format = format_cell.get_text(strip=True)
         
         return transaction
     
@@ -631,9 +760,12 @@ async def main():
             prop = properties[0]
             print(f"\nExample property:")
             print(f"  ID: {prop.property_id}")
+            print(f"  Location: {prop.location_breadcrumb}")
             print(f"  Estate: {prop.estate_name}")
-            print(f"  District: {prop.district}")
-            print(f"  Price: {prop.sell_price} (${prop.sell_price_millions:.2f}M)")
+            if prop.sell_price_millions:
+                print(f"  Price: {prop.sell_price} (${prop.sell_price_millions:.2f}M)")
+            else:
+                print(f"  Price: {prop.sell_price or 'Not found'}")
             print(f"  Gross Area: {prop.gross_area_sqft} ft² @ ${prop.gross_area_unit_price}/ft²")
             print(f"  Saleable Area: {prop.saleable_area_sqft} ft² @ ${prop.saleable_area_unit_price}/ft²")
             print(f"  Address: {prop.full_address}")
