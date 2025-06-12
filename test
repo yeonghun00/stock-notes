@@ -1,3 +1,458 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import re
+from collections import Counter
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# ========================================
+# STEP 1: CREATE DUMMY DATA
+# ========================================
+print("=" * 80)
+print("STEP 1: CREATING REALISTIC BANKING TRADE DATA")
+print("=" * 80)
+
+# Define realistic parameters
+n_rows = 10000  # Using smaller sample for demonstration (scale to 4M in production)
+
+# Customer pools
+customer_names = [
+    "Acme Corporation", "Global Industries Ltd", "Tech Innovations Inc", 
+    "Manufacturing Giants Co", "Retail Empire Group", "Energy Solutions Corp",
+    "Financial Services Ltd", "Healthcare Systems Inc", "Transport Logistics Co",
+    "Real Estate Holdings", "Consumer Goods Inc", "Digital Media Group",
+    "Pharmaceutical Labs", "Construction Masters", "Food & Beverage Co",
+    "Textile Industries", "Mining Operations Ltd", "Telecom Networks Inc",
+    "Insurance Partners", "Investment Holdings", "Export Import Co",
+    "Chemical Industries", "Steel Manufacturing", "Paper Mills Ltd",
+    "Automotive Parts Co", "Electronics Assembly", "Shipping Lines Ltd",
+    "Agriculture Exports", "Hospitality Group", "Education Services"
+]
+
+industries = [
+    "Manufacturing", "Technology", "Healthcare", "Financial Services", 
+    "Retail", "Energy", "Real Estate", "Transportation", "Telecommunications",
+    "Consumer Goods", "Pharmaceuticals", "Construction", "Food & Beverage",
+    "Textiles", "Mining", "Insurance", "Chemicals", "Steel", "Paper",
+    "Automotive", "Electronics", "Shipping", "Agriculture", "Hospitality"
+]
+
+# Counterparty banks with realistic names
+counterparty_banks = [
+    "HSBC", "Standard Chartered", "Bank of America", "JP Morgan Chase",
+    "Citibank", "Deutsche Bank", "BNP Paribas", "Credit Suisse",
+    "UBS", "Barclays", "Royal Bank of Canada", "Bank of China",
+    "Industrial Commercial Bank of China", "Mitsubishi UFJ", "Sumitomo Mitsui",
+    "DBS Bank", "OCBC Bank", "Commonwealth Bank", "ANZ Bank", "Wells Fargo"
+]
+
+# Counterparty addresses with intentionally inconsistent country formats
+address_patterns = [
+    "{street}, Hong Kong, HK",
+    "{street}, Singapore, SG",
+    "{street}, London, United Kingdom",
+    "{street}, New York, USA",
+    "{street}, Tokyo, Japan",
+    "{street}, Shanghai, China CN",
+    "{street}, Mumbai, India",
+    "{street}, Dubai, UAE",
+    "{street}, Frankfurt, Germany",
+    "{street}, Paris, France",
+    "{street}, Sydney, Australia",
+    "{street}, Toronto, Canada",
+    "{street}, Zurich, Switzerland",
+    "{street}, Seoul, South Korea",
+    "{street}, {company} Hong Kong Branch, HK",
+    "{street}, {company} Singapore Operations",
+    "{street}, Beijing CN",
+    "{street}, Taiwan, ROC",
+    "{street}, Malaysia, KL",
+    "{street}, Thailand, Bangkok"
+]
+
+streets = [
+    "1 Financial Plaza", "88 Commerce Street", "200 Business Park",
+    "50 Trade Center", "15 Banking Boulevard", "99 Corporate Drive",
+    "30 Exchange Place", "77 Market Street", "10 Harbor View"
+]
+
+# Generate data
+print("\nGenerating trade transaction data...")
+
+# Create date range (last 2 years)
+end_date = datetime.now()
+start_date = end_date - timedelta(days=730)
+dates = pd.date_range(start=start_date, end=end_date, periods=n_rows)
+
+# Generate transactions with realistic patterns
+data = []
+for i in range(n_rows):
+    # Select customer (some customers trade more frequently)
+    customer = np.random.choice(customer_names, p=np.array([0.1 if i < 5 else 0.03 for i in range(len(customer_names))]) / sum([0.1 if i < 5 else 0.03 for i in range(len(customer_names))]))
+    
+    # Industry based on customer
+    if "Tech" in customer or "Digital" in customer:
+        industry = "Technology"
+    elif "Manufacturing" in customer or "Steel" in customer:
+        industry = "Manufacturing"
+    elif "Financial" in customer or "Investment" in customer or "Insurance" in customer:
+        industry = "Financial Services"
+    elif "Healthcare" in customer or "Pharmaceutical" in customer:
+        industry = "Healthcare"
+    elif "Energy" in customer:
+        industry = "Energy"
+    elif "Retail" in customer or "Consumer" in customer:
+        industry = "Retail"
+    else:
+        industry = np.random.choice(industries)
+    
+    # Amount with industry-specific patterns
+    if industry == "Financial Services":
+        amount = np.random.lognormal(15, 1.5)  # Larger transactions
+    elif industry == "Retail":
+        amount = np.random.lognormal(12, 1.2)  # Smaller, frequent
+    elif industry == "Energy":
+        amount = np.random.lognormal(16, 1.3)  # Very large
+    else:
+        amount = np.random.lognormal(13.5, 1.4)  # Medium
+    
+    amount = min(amount, 1e9)  # Cap at 1 billion
+    
+    # Counterparty selection (some banks are more popular)
+    bank = np.random.choice(counterparty_banks, 
+                           p=np.array([0.15 if i < 3 else 0.05 for i in range(len(counterparty_banks))]) / 
+                           sum([0.15 if i < 3 else 0.05 for i in range(len(counterparty_banks))]))
+    
+    # Address with inconsistent formats
+    address_template = np.random.choice(address_patterns)
+    street = np.random.choice(streets)
+    address = address_template.format(street=street, company=bank)
+    
+    data.append({
+        'Date': dates[i],
+        'Customer_Name': customer,
+        'Customer_Industry': industry,
+        'Amount': round(amount, 2),
+        'Counterparty_Bank': bank,
+        'Counterparty_Address': address
+    })
+
+# Create DataFrame
+df = pd.DataFrame(data)
+print(f"\nCreated {len(df):,} trade records")
+print(f"Date range: {df['Date'].min().date()} to {df['Date'].max().date()}")
+print(f"Total transaction volume: ${df['Amount'].sum():,.2f}")
+
+# Display sample
+print("\nSample of generated data:")
+print(df.head(10))
+
+# ========================================
+# STEP 2: DATA QUALITY ASSESSMENT
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 2: DATA QUALITY ASSESSMENT")
+print("=" * 80)
+
+# Basic statistics
+print("\nBasic Data Statistics:")
+print(f"- Total records: {len(df):,}")
+print(f"- Date range: {df['Date'].min().date()} to {df['Date'].max().date()}")
+print(f"- Unique customers: {df['Customer_Name'].nunique()}")
+print(f"- Unique industries: {df['Customer_Industry'].nunique()}")
+print(f"- Unique counterparty banks: {df['Counterparty_Bank'].nunique()}")
+
+# Check for missing values
+print("\nMissing Values Check:")
+print(df.isnull().sum())
+
+# Amount statistics
+print("\nTransaction Amount Statistics:")
+print(f"- Mean: ${df['Amount'].mean():,.2f}")
+print(f"- Median: ${df['Amount'].median():,.2f}")
+print(f"- Std Dev: ${df['Amount'].std():,.2f}")
+print(f"- Min: ${df['Amount'].min():,.2f}")
+print(f"- Max: ${df['Amount'].max():,.2f}")
+print(f"- Total Volume: ${df['Amount'].sum():,.2f}")
+
+# ========================================
+# STEP 3: EXTRACT COUNTRY INFORMATION
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 3: EXTRACTING COUNTRY FROM ADDRESSES")
+print("=" * 80)
+
+def extract_country(address):
+    """
+    Extract country from inconsistent address formats
+    Using multiple strategies as a senior data scientist would
+    """
+    # Define country mappings and patterns
+    country_mappings = {
+        'HK': 'Hong Kong', 'Hong Kong': 'Hong Kong',
+        'SG': 'Singapore', 'Singapore': 'Singapore',
+        'CN': 'China', 'China': 'China', 'Shanghai': 'China', 'Beijing': 'China',
+        'USA': 'United States', 'United States': 'United States', 'New York': 'United States',
+        'UK': 'United Kingdom', 'United Kingdom': 'United Kingdom', 'London': 'United Kingdom',
+        'UAE': 'United Arab Emirates', 'Dubai': 'United Arab Emirates',
+        'Japan': 'Japan', 'Tokyo': 'Japan',
+        'India': 'India', 'Mumbai': 'India',
+        'Germany': 'Germany', 'Frankfurt': 'Germany',
+        'France': 'France', 'Paris': 'France',
+        'Australia': 'Australia', 'Sydney': 'Australia',
+        'Canada': 'Canada', 'Toronto': 'Canada',
+        'Switzerland': 'Switzerland', 'Zurich': 'Switzerland',
+        'South Korea': 'South Korea', 'Seoul': 'South Korea',
+        'ROC': 'Taiwan', 'Taiwan': 'Taiwan',
+        'Malaysia': 'Malaysia', 'KL': 'Malaysia',
+        'Thailand': 'Thailand', 'Bangkok': 'Thailand'
+    }
+    
+    # Convert to uppercase for matching
+    address_upper = address.upper()
+    
+    # Try to find country in the address
+    for key, country in country_mappings.items():
+        if key.upper() in address_upper:
+            return country
+    
+    # If no match found, mark as "Unknown"
+    return "Unknown"
+
+# Apply country extraction
+print("\nExtracting countries from addresses...")
+df['Counterparty_Country'] = df['Counterparty_Address'].apply(extract_country)
+
+# Show extraction results
+print("\nCountry extraction results:")
+country_counts = df['Counterparty_Country'].value_counts()
+print(country_counts)
+
+# Check for unknowns
+unknown_pct = (df['Counterparty_Country'] == 'Unknown').mean() * 100
+print(f"\nPercentage of addresses with unknown country: {unknown_pct:.2f}%")
+
+if unknown_pct > 0:
+    print("\nSample of addresses with unknown country:")
+    print(df[df['Counterparty_Country'] == 'Unknown']['Counterparty_Address'].head())
+
+# ========================================
+# STEP 4: FEATURE ENGINEERING
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 4: FEATURE ENGINEERING FOR DEEPER INSIGHTS")
+print("=" * 80)
+
+# Time-based features
+df['Year'] = df['Date'].dt.year
+df['Month'] = df['Date'].dt.month
+df['Quarter'] = df['Date'].dt.quarter
+df['DayOfWeek'] = df['Date'].dt.dayofweek
+df['WeekOfYear'] = df['Date'].dt.isocalendar().week
+
+# Transaction size categories
+df['Transaction_Size'] = pd.cut(df['Amount'], 
+                                bins=[0, 10000, 100000, 1000000, 10000000, float('inf')],
+                                labels=['Small (<10K)', 'Medium (10K-100K)', 
+                                       'Large (100K-1M)', 'Very Large (1M-10M)', 
+                                       'Mega (>10M)'])
+
+print("\nFeatures created:")
+print("- Time-based: Year, Month, Quarter, DayOfWeek, WeekOfYear")
+print("- Transaction_Size categories")
+
+# ========================================
+# STEP 5: CUSTOMER BEHAVIOR ANALYSIS
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 5: CUSTOMER BEHAVIOR ANALYSIS")
+print("=" * 80)
+
+# Customer transaction summary
+customer_summary = df.groupby('Customer_Name').agg({
+    'Amount': ['count', 'sum', 'mean', 'std', 'min', 'max'],
+    'Counterparty_Bank': lambda x: x.nunique(),
+    'Counterparty_Country': lambda x: x.nunique()
+}).round(2)
+
+customer_summary.columns = ['Trade_Count', 'Total_Volume', 'Avg_Transaction', 
+                           'Std_Dev', 'Min_Transaction', 'Max_Transaction',
+                           'Unique_Banks', 'Unique_Countries']
+customer_summary = customer_summary.sort_values('Total_Volume', ascending=False)
+
+print("\nTop 10 Customers by Transaction Volume:")
+print(customer_summary.head(10))
+
+# Customer segmentation
+customer_summary['Segment'] = pd.cut(customer_summary['Total_Volume'], 
+                                    bins=[0, 1e6, 1e7, 1e8, float('inf')],
+                                    labels=['Small', 'Medium', 'Large', 'Strategic'])
+
+print("\nCustomer Segmentation:")
+print(customer_summary['Segment'].value_counts())
+
+# ========================================
+# STEP 6: TRADE FLOW ANALYSIS
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 6: TRADE FLOW ANALYSIS BY COUNTRY")
+print("=" * 80)
+
+# Country flow analysis
+country_flow = df.groupby(['Customer_Industry', 'Counterparty_Country']).agg({
+    'Amount': ['count', 'sum', 'mean']
+}).round(2)
+country_flow.columns = ['Trade_Count', 'Total_Volume', 'Avg_Transaction']
+country_flow = country_flow.sort_values('Total_Volume', ascending=False)
+
+print("\nTop 20 Industry-Country Trade Flows:")
+print(country_flow.head(20))
+
+# ========================================
+# STEP 7: TEMPORAL PATTERNS
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 7: TEMPORAL PATTERNS ANALYSIS")
+print("=" * 80)
+
+# Monthly trends
+monthly_trends = df.groupby(df['Date'].dt.to_period('M')).agg({
+    'Amount': ['count', 'sum', 'mean']
+}).round(2)
+monthly_trends.columns = ['Trade_Count', 'Total_Volume', 'Avg_Transaction']
+
+print("\nMonthly Trading Trends (Last 6 months):")
+print(monthly_trends.tail(6))
+
+# Day of week patterns
+dow_patterns = df.groupby('DayOfWeek').agg({
+    'Amount': ['count', 'sum', 'mean']
+}).round(2)
+dow_patterns.columns = ['Trade_Count', 'Total_Volume', 'Avg_Transaction']
+dow_patterns.index = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+print("\nDay of Week Trading Patterns:")
+print(dow_patterns)
+
+# ========================================
+# STEP 8: RISK INDICATORS
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 8: RISK INDICATORS AND ANOMALIES")
+print("=" * 80)
+
+# Calculate customer-level statistics for anomaly detection
+customer_stats = df.groupby('Customer_Name')['Amount'].agg(['mean', 'std']).reset_index()
+df = df.merge(customer_stats, on='Customer_Name', suffixes=('', '_customer'))
+
+# Flag potentially unusual transactions (>3 std dev from customer mean)
+df['Is_Unusual'] = np.abs(df['Amount'] - df['mean']) > (3 * df['std'])
+
+print(f"\nTotal unusual transactions detected: {df['Is_Unusual'].sum()}")
+print(f"Percentage of unusual transactions: {df['Is_Unusual'].mean()*100:.2f}%")
+
+# High-risk countries (placeholder - in real scenario, use compliance list)
+high_risk_countries = ['Unknown']  # Add more based on compliance requirements
+df['High_Risk_Country'] = df['Counterparty_Country'].isin(high_risk_countries)
+
+print(f"\nTransactions with high-risk countries: {df['High_Risk_Country'].sum()}")
+
+# ========================================
+# STEP 9: KEY INSIGHTS FOR RMs
+# ========================================
+print("\n" + "=" * 80)
+print("STEP 9: KEY INSIGHTS AND RECOMMENDATIONS FOR RMs")
+print("=" * 80)
+
+print("\n1. CUSTOMER CONCENTRATION RISK:")
+top5_volume = customer_summary.head(5)['Total_Volume'].sum()
+total_volume = df['Amount'].sum()
+concentration = (top5_volume / total_volume) * 100
+print(f"   - Top 5 customers account for {concentration:.1f}% of total volume")
+print("   - Recommendation: Diversify client base to reduce concentration risk")
+
+print("\n2. GEOGRAPHIC EXPOSURE:")
+country_exposure = df.groupby('Counterparty_Country')['Amount'].sum().sort_values(ascending=False)
+top3_countries = country_exposure.head(3)
+print("   Top 3 countries by exposure:")
+for country, amount in top3_countries.items():
+    pct = (amount / total_volume) * 100
+    print(f"   - {country}: ${amount:,.0f} ({pct:.1f}%)")
+
+print("\n3. INDUSTRY TRENDS:")
+industry_growth = df.groupby(['Customer_Industry', df['Date'].dt.to_period('Q')])['Amount'].sum().unstack()
+if len(industry_growth.columns) >= 2:
+    industry_growth['QoQ_Growth'] = (industry_growth.iloc[:, -1] / industry_growth.iloc[:, -2] - 1) * 100
+    print("   Quarter-over-Quarter Growth by Industry:")
+    print(industry_growth['QoQ_Growth'].sort_values(ascending=False).head())
+
+print("\n4. OPERATIONAL EFFICIENCY:")
+print(f"   - Average daily transactions: {len(df) / ((df['Date'].max() - df['Date'].min()).days):.1f}")
+print(f"   - Peak trading day: {dow_patterns['Trade_Count'].idxmax()}")
+print(f"   - Quiet trading day: {dow_patterns['Trade_Count'].idxmin()}")
+
+print("\n5. ACTIONABLE RECOMMENDATIONS:")
+print("   - Focus on Strategic segment customers (>$100M volume)")
+print("   - Investigate unusual transactions for compliance")
+print("   - Develop country-specific strategies for top 3 markets")
+print("   - Consider industry-specific products for growing sectors")
+print("   - Optimize operations for peak trading days")
+
+# ========================================
+# VISUALIZATION SETUP
+# ========================================
+print("\n" + "=" * 80)
+print("VISUALIZATION CODE (Run separately for charts)")
+print("=" * 80)
+
+print("""
+# Run this code to generate visualizations:
+
+# 1. Transaction Volume by Industry
+plt.figure(figsize=(12, 6))
+industry_volume = df.groupby('Customer_Industry')['Amount'].sum().sort_values(ascending=True)
+industry_volume.plot(kind='barh')
+plt.title('Total Transaction Volume by Industry')
+plt.xlabel('Transaction Volume ($)')
+plt.tight_layout()
+plt.show()
+
+# 2. Monthly Trend
+plt.figure(figsize=(12, 6))
+monthly_volume = df.groupby(df['Date'].dt.to_period('M'))['Amount'].sum()
+monthly_volume.plot(kind='line', marker='o')
+plt.title('Monthly Transaction Volume Trend')
+plt.xlabel('Month')
+plt.ylabel('Transaction Volume ($)')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# 3. Customer Segmentation
+plt.figure(figsize=(8, 8))
+customer_summary['Segment'].value_counts().plot(kind='pie', autopct='%1.1f%%')
+plt.title('Customer Segmentation by Transaction Volume')
+plt.ylabel('')
+plt.show()
+
+# 4. Geographic Distribution
+plt.figure(figsize=(12, 6))
+country_volume = df.groupby('Counterparty_Country')['Amount'].sum().sort_values(ascending=True).tail(10)
+country_volume.plot(kind='barh')
+plt.title('Top 10 Countries by Transaction Volume')
+plt.xlabel('Transaction Volume ($)')
+plt.tight_layout()
+plt.show()
+""")
+
+
+
 #!/usr/bin/env python3
 """
 Production-Ready ML Systems for Banking Analytics
