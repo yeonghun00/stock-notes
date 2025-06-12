@@ -1,871 +1,2571 @@
+#!/usr/bin/env python3
+"""
+Production-Ready ML Systems for Banking Analytics
+Real-time Scoring, Advanced Models, and Deployment Pipeline
+"""
+
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.data import Data, DataLoader
+import tensorflow as tf
+from tensorflow import keras
+import optuna
+from sklearn.ensemble import StackingRegressor, VotingClassifier
+from sklearn.model_selection import TimeSeriesSplit
+import mlflow
+import mlflow.sklearn
+import redis
+import joblib
+from kafka import KafkaProducer, KafkaConsumer
+import json
+import asyncio
+import aioredis
 from datetime import datetime, timedelta
+import gym
+from gym import spaces
+from stable_baselines3 import PPO, A2C
+import ray
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
+import shap
+import lime
+from alibi.explainers import AnchorTabular
+import great_expectations as ge
+from evidently import ColumnDriftMetric, DataDriftPreset, DataQualityPreset
+from evidently.report import Report
 import warnings
-from scipy import stats
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
 warnings.filterwarnings('ignore')
 
-# Set style
-plt.style.use('seaborn-v0_8-darkgrid')
-sns.set_palette("husl")
+# ============================================================================
+# 1. REAL-TIME SCORING SYSTEM
+# ============================================================================
 
-# ==================== DATA GENERATION ====================
-# Simulating realistic banking trade data
-np.random.seed(42)
-
-# Generate date range
-start_date = '2023-01-01'
-end_date = '2025-05-29'
-dates = pd.date_range(start=start_date, end=end_date, freq='B')  # Business days only
-
-# Key event - focusing only on April 2nd
-apr_event = pd.Timestamp('2025-04-02')
-
-# Customer and security setup
-n_customers = 500
-customers = [f'Customer_{i:03d}' for i in range(n_customers)]
-industries = ['Technology', 'Manufacturing', 'Finance', 'Retail', 'Healthcare', 
-              'Energy', 'Real Estate', 'Consumer Goods']
-security_types = ['Foreign Stocks', 'Local Stocks', 'Bonds', 'Certificate of Deposit', 
-                  'Unit Trusts', 'ETFs']
-
-# Generate trades
-trades = []
-for date in dates:
-    # Adjust trading patterns based on April 2nd event
-    if date >= apr_event:
-        foreign_bias = 0.25  # Reduced foreign investment after event
-        volume_multiplier = 1.3  # Increased trading volume
-    else:
-        foreign_bias = 0.45
-        volume_multiplier = 1.0
+class RealTimeScoring:
+    """
+    Production-ready real-time scoring system with caching and monitoring
+    """
     
-    # Daily trades (varying by day)
-    n_trades = np.random.poisson(200 * volume_multiplier)
-    
-    for _ in range(n_trades):
-        customer = np.random.choice(customers)
-        industry = np.random.choice(industries)
+    def __init__(self, models, redis_host='localhost', redis_port=6379):
+        self.models = models
+        self.redis_client = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        self.feature_store = {}
+        self.model_versions = {}
         
-        # Bias security selection based on period
-        if date >= apr_event:
-            security_probs = [foreign_bias, 1-foreign_bias+0.15, 0.12, 0.08, 0.05, 0.05]
+    async def initialize_async_components(self):
+        """Initialize async Redis client for high-performance scoring"""
+        self.async_redis = await aioredis.create_redis_pool(
+            'redis://localhost:6379',
+            encoding='utf-8'
+        )
+        
+    def create_feature_pipeline(self, df):
+        """
+        Create real-time feature engineering pipeline
+        """
+        class FeatureEngineering:
+            def __init__(self):
+                self.feature_stats = {}
+                
+            def fit(self, df):
+                """Calculate statistics for real-time normalization"""
+                self.feature_stats = {
+                    'volume_mean': df['Amount'].abs().mean(),
+                    'volume_std': df['Amount'].abs().std(),
+                    'trade_freq_mean': df.groupby('Customer Name').size().mean(),
+                    'trade_freq_std': df.groupby('Customer Name').size().std()
+                }
+                return self
+                
+            def transform_realtime(self, transaction):
+                """Transform single transaction in real-time"""
+                features = {}
+                
+                # Basic features
+                features['amount_normalized'] = (
+                    abs(transaction['Amount']) - self.feature_stats['volume_mean']
+                ) / self.feature_stats['volume_std']
+                
+                features['is_buy'] = 1 if transaction['Investment'] == 'Buy' else 0
+                features['hour'] = pd.to_datetime(transaction['Date']).hour
+                features['day_of_week'] = pd.to_datetime(transaction['Date']).dayofweek
+                features['is_month_end'] = pd.to_datetime(transaction['Date']).day > 25
+                
+                # Encode security type
+                security_types = ['Foreign Stocks', 'Local Stocks (HK)', 'Bonds', 
+                                'Certificate of Deposit', 'Unit Trusts', 'ETFs', 'Derivatives']
+                for st in security_types:
+                    features[f'security_{st}'] = 1 if transaction['Security Type'] == st else 0
+                
+                return features
+                
+        pipeline = FeatureEngineering()
+        pipeline.fit(df)
+        return pipeline
+        
+    async def score_transaction(self, transaction, model_name='churn'):
+        """
+        Score a single transaction in real-time
+        """
+        # Check cache first
+        cache_key = f"{model_name}:{transaction['Customer Name']}:{transaction['Date']}"
+        cached_score = await self.async_redis.get(cache_key)
+        
+        if cached_score:
+            return float(cached_score)
+        
+        # Engineer features
+        features = self.feature_pipeline.transform_realtime(transaction)
+        
+        # Get customer historical features from feature store
+        customer_features = await self._get_customer_features(transaction['Customer Name'])
+        features.update(customer_features)
+        
+        # Score with model
+        feature_array = np.array([features[f] for f in sorted(features.keys())])
+        
+        if model_name == 'churn':
+            score = self.models['churn'].predict_proba(feature_array.reshape(1, -1))[0, 1]
+        elif model_name == 'anomaly':
+            score = self.models['anomaly'].decision_function(feature_array.reshape(1, -1))[0]
         else:
-            security_probs = [0.45, 0.35, 0.10, 0.05, 0.03, 0.02]
-        
-        security_probs = np.array(security_probs) / sum(security_probs)
-        security_type = np.random.choice(security_types, p=security_probs)
-        
-        # Generate trade details - all amounts are already NET (positive = net buy, negative = net sell)
-        net_amount = np.random.normal(0, 1000000)  # Can be positive or negative
-        
-        trades.append({
-            'Date': date,
-            'Customer_Name': customer,
-            'Customer_Industry': industry,
-            'Net_Amount': net_amount,  # This is the only amount field we need
-            'Security_Type': security_type
-        })
-
-# Create DataFrame
-df = pd.DataFrame(trades)
-print(f"Generated {len(df)} trades from {df['Date'].min()} to {df['Date'].max()}")
-
-# ==================== ANALYSIS FUNCTIONS ====================
-
-def calculate_trading_metrics(data, groupby_cols=['Date']):
-    """Calculate key trading metrics"""
-    metrics = data.groupby(groupby_cols).agg({
-        'Net_Amount': ['sum', 'mean', 'count', 'std']
-    }).reset_index()
-    
-    metrics.columns = ['_'.join(col).strip() for col in metrics.columns.values]
-    metrics.columns = [col.replace('_', '') if col.endswith('_') else col for col in metrics.columns]
-    
-    return metrics
-
-def perform_event_study(df, event_date, window_pre=30, window_post=30):
-    """Perform event study analysis"""
-    event_date = pd.Timestamp(event_date)
-    
-    # Define windows
-    pre_start = event_date - timedelta(days=window_pre)
-    post_end = event_date + timedelta(days=window_post)
-    
-    # Filter data
-    event_data = df[(df['Date'] >= pre_start) & (df['Date'] <= post_end)].copy()
-    event_data['Days_from_event'] = (event_data['Date'] - event_date).dt.days
-    
-    # Calculate daily metrics
-    daily_metrics = event_data.groupby('Days_from_event').agg({
-        'Net_Amount': ['sum', 'count', 'mean']
-    }).reset_index()
-    
-    daily_metrics.columns = ['Days_from_event', 'Total_Net_Amount', 'Trade_Count', 'Avg_Net_Amount']
-    
-    # Calculate abnormal trading (using pre-event average as baseline)
-    pre_event = daily_metrics[daily_metrics['Days_from_event'] < 0]
-    baseline_amount = pre_event['Total_Net_Amount'].mean()
-    baseline_count = pre_event['Trade_Count'].mean()
-    
-    daily_metrics['Abnormal_Amount'] = daily_metrics['Total_Net_Amount'] - baseline_amount
-    daily_metrics['Abnormal_Count'] = daily_metrics['Trade_Count'] - baseline_count
-    
-    # Cumulative abnormal
-    daily_metrics['CAR'] = daily_metrics['Abnormal_Amount'].cumsum()
-    
-    return daily_metrics
-
-def portfolio_shift_analysis(df, date_cutoff):
-    """Analyze portfolio composition shifts"""
-    pre_data = df[df['Date'] < date_cutoff]
-    post_data = df[df['Date'] >= date_cutoff]
-    
-    # Calculate security type distribution by absolute value (since we're dealing with net amounts)
-    pre_dist = pre_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
-    post_dist = post_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
-    
-    pre_pct = (pre_dist / pre_dist.sum() * 100).round(2)
-    post_pct = (post_dist / post_dist.sum() * 100).round(2)
-    
-    shift_df = pd.DataFrame({
-        'Pre_Period_%': pre_pct,
-        'Post_Period_%': post_pct,
-        'Change_%': post_pct - pre_pct
-    })
-    
-    return shift_df
-
-def customer_behavior_clustering(df, event_date):
-    """Cluster customers based on behavioral changes"""
-    event_date = pd.Timestamp(event_date)
-    
-    # Calculate customer metrics pre/post
-    customer_metrics = []
-    
-    for customer in df['Customer_Name'].unique():
-        cust_data = df[df['Customer_Name'] == customer]
-        
-        pre_data = cust_data[cust_data['Date'] < event_date]
-        post_data = cust_data[cust_data['Date'] >= event_date]
-        
-        if len(pre_data) > 0 and len(post_data) > 0:
-            # Calculate metrics using absolute values for volume, but keep sign for foreign exposure
-            pre_foreign = pre_data[pre_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].sum()
-            post_foreign = post_data[post_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].sum()
+            score = 0.0
             
-            pre_total_abs = pre_data['Net_Amount'].abs().sum()
-            post_total_abs = post_data['Net_Amount'].abs().sum()
+        # Cache result
+        await self.async_redis.setex(cache_key, 3600, str(score))  # 1 hour cache
+        
+        # Log for monitoring
+        await self._log_prediction(transaction, model_name, score)
+        
+        return score
+        
+    async def _get_customer_features(self, customer_name):
+        """Get customer features from feature store"""
+        features = await self.async_redis.hgetall(f"customer_features:{customer_name}")
+        
+        if not features:
+            # Calculate on the fly if not in cache
+            features = {
+                'lifetime_volume': 0,
+                'trade_count': 0,
+                'days_since_last_trade': 0,
+                'product_diversity': 1
+            }
             
-            pre_foreign_pct = (abs(pre_foreign) / pre_total_abs * 100) if pre_total_abs > 0 else 0
-            post_foreign_pct = (abs(post_foreign) / post_total_abs * 100) if post_total_abs > 0 else 0
+        return {k: float(v) for k, v in features.items()}
+        
+    async def _log_prediction(self, transaction, model_name, score):
+        """Log predictions for monitoring"""
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'customer': transaction['Customer Name'],
+            'model': model_name,
+            'score': score,
+            'features': transaction
+        }
+        
+        # Send to monitoring system (Kafka)
+        producer = KafkaProducer(
+            bootstrap_servers=['localhost:9092'],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+        producer.send('ml_predictions', log_entry)
+        producer.flush()
+        
+    def create_streaming_pipeline(self):
+        """
+        Create Kafka streaming pipeline for real-time scoring
+        """
+        consumer = KafkaConsumer(
+            'transactions',
+            bootstrap_servers=['localhost:9092'],
+            auto_offset_reset='latest',
+            value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+        )
+        
+        async def process_stream():
+            for message in consumer:
+                transaction = message.value
+                
+                # Score transaction
+                churn_score = await self.score_transaction(transaction, 'churn')
+                anomaly_score = await self.score_transaction(transaction, 'anomaly')
+                
+                # Trigger alerts if needed
+                if churn_score > 0.8:
+                    await self._trigger_alert('high_churn_risk', transaction, churn_score)
+                    
+                if anomaly_score < -0.5:
+                    await self._trigger_alert('anomaly_detected', transaction, anomaly_score)
+                    
+        return process_stream
+        
+    async def _trigger_alert(self, alert_type, transaction, score):
+        """Trigger real-time alerts"""
+        alert = {
+            'type': alert_type,
+            'customer': transaction['Customer Name'],
+            'score': score,
+            'timestamp': datetime.now().isoformat(),
+            'transaction': transaction
+        }
+        
+        # Send to alert system
+        await self.async_redis.publish('alerts', json.dumps(alert))
+
+# ============================================================================
+# 2. GRAPH NEURAL NETWORKS FOR FRAUD DETECTION
+# ============================================================================
+
+class GraphNeuralNetwork(nn.Module):
+    """
+    GNN for detecting fraud patterns in transaction networks
+    """
+    
+    def __init__(self, num_features, hidden_dim=64, num_classes=2):
+        super(GraphNeuralNetwork, self).__init__()
+        self.conv1 = GCNConv(num_features, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, 32)
+        self.classifier = nn.Linear(32, num_classes)
+        self.dropout = nn.Dropout(0.2)
+        
+    def forward(self, x, edge_index, batch):
+        # Graph convolutions
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.dropout(x)
+        
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = self.dropout(x)
+        
+        x = self.conv3(x, edge_index)
+        x = F.relu(x)
+        
+        # Global pooling
+        x = global_mean_pool(x, batch)
+        
+        # Classification
+        x = self.classifier(x)
+        return F.log_softmax(x, dim=1)
+
+class FraudDetectionGNN:
+    """
+    Complete fraud detection system using GNNs
+    """
+    
+    def __init__(self):
+        self.model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+    def create_transaction_graph(self, df):
+        """
+        Create graph from transaction data
+        """
+        # Create nodes for customers and accounts
+        customers = df['Customer Name'].unique()
+        customer_to_idx = {c: i for i, c in enumerate(customers)}
+        
+        # Create edges based on transaction patterns
+        edges = []
+        edge_features = []
+        
+        # Find customers with similar patterns (potential fraud rings)
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        # Create customer feature matrix
+        customer_features = df.pivot_table(
+            index='Customer Name',
+            columns='Security Type',
+            values='Amount',
+            aggfunc=lambda x: x.abs().sum(),
+            fill_value=0
+        )
+        
+        # Calculate similarity
+        similarity_matrix = cosine_similarity(customer_features)
+        
+        # Create edges for similar customers
+        threshold = 0.8
+        for i in range(len(customers)):
+            for j in range(i+1, len(customers)):
+                if similarity_matrix[i, j] > threshold:
+                    edges.append([i, j])
+                    edges.append([j, i])  # Undirected
+                    edge_features.extend([similarity_matrix[i, j]] * 2)
+                    
+        # Also add edges for customers trading same securities on same day
+        same_day_trades = df.groupby(['Date', 'Security ID'])['Customer Name'].apply(list)
+        
+        for traders in same_day_trades:
+            if len(traders) > 1:
+                for i in range(len(traders)):
+                    for j in range(i+1, len(traders)):
+                        if traders[i] in customer_to_idx and traders[j] in customer_to_idx:
+                            idx_i = customer_to_idx[traders[i]]
+                            idx_j = customer_to_idx[traders[j]]
+                            edges.append([idx_i, idx_j])
+                            edges.append([idx_j, idx_i])
+                            edge_features.extend([1.0] * 2)
+                            
+        # Create node features
+        node_features = []
+        for customer in customers:
+            cust_data = df[df['Customer Name'] == customer]
+            features = [
+                cust_data['Amount'].abs().sum(),  # Total volume
+                len(cust_data),  # Trade count
+                cust_data['Security Type'].nunique(),  # Product diversity
+                (cust_data['Investment'] == 'Buy').mean(),  # Buy ratio
+                cust_data['Amount'].abs().std(),  # Volume volatility
+                len(cust_data['Date'].unique()),  # Active days
+            ]
+            node_features.append(features)
             
-            # Calculate absolute changes for better clustering
-            foreign_abs_change = abs(post_foreign_pct - pre_foreign_pct)
-            volume_abs_change = abs((post_total_abs - pre_total_abs) / pre_total_abs * 100) if pre_total_abs > 0 else 0
+        # Convert to PyTorch geometric data
+        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+        x = torch.tensor(node_features, dtype=torch.float)
+        
+        # Create labels (simulate fraud labels - in practice, use real labels)
+        # Flag suspicious patterns
+        labels = torch.zeros(len(customers), dtype=torch.long)
+        suspicious_customers = df.groupby('Customer Name').filter(
+            lambda x: (x['Amount'].abs() > x['Amount'].abs().quantile(0.99)).any()
+        )['Customer Name'].unique()
+        
+        for customer in suspicious_customers:
+            if customer in customer_to_idx:
+                labels[customer_to_idx[customer]] = 1
+                
+        data = Data(x=x, edge_index=edge_index, y=labels)
+        
+        return data, customer_to_idx
+        
+    def train_fraud_detector(self, data, epochs=200):
+        """
+        Train GNN for fraud detection
+        """
+        # Initialize model
+        self.model = GraphNeuralNetwork(
+            num_features=data.x.shape[1],
+            hidden_dim=64,
+            num_classes=2
+        ).to(self.device)
+        
+        data = data.to(self.device)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
+        
+        # Train/test split
+        num_nodes = data.x.shape[0]
+        indices = torch.randperm(num_nodes)
+        train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+        train_mask[indices[:int(0.8 * num_nodes)]] = True
+        test_mask = ~train_mask
+        
+        self.model.train()
+        for epoch in range(epochs):
+            optimizer.zero_grad()
             
-            customer_metrics.append({
-                'Customer': customer,
-                'Pre_Foreign_%': pre_foreign_pct,
-                'Post_Foreign_%': post_foreign_pct,
-                'Foreign_Change_%': post_foreign_pct - pre_foreign_pct,
-                'Volume_Change_%': ((post_total_abs - pre_total_abs) / pre_total_abs * 100) if pre_total_abs > 0 else 0,
-                'Foreign_Abs_Change_%': foreign_abs_change,
-                'Volume_Abs_Change_%': volume_abs_change,
-                'Pre_Trade_Count': len(pre_data),
-                'Post_Trade_Count': len(post_data),
-                'Total_Volume': pre_total_abs + post_total_abs
+            # Create batch (all nodes in one batch for simplicity)
+            batch = torch.zeros(num_nodes, dtype=torch.long).to(self.device)
+            
+            out = self.model(data.x, data.edge_index, batch)
+            loss = F.nll_loss(out[train_mask], data.y[train_mask])
+            loss.backward()
+            optimizer.step()
+            
+            if epoch % 20 == 0:
+                self.model.eval()
+                with torch.no_grad():
+                    pred = self.model(data.x, data.edge_index, batch).argmax(dim=1)
+                    train_acc = (pred[train_mask] == data.y[train_mask]).float().mean()
+                    test_acc = (pred[test_mask] == data.y[test_mask]).float().mean()
+                print(f'Epoch {epoch}: Train Acc: {train_acc:.4f}, Test Acc: {test_acc:.4f}')
+                self.model.train()
+                
+        return self.model
+        
+    def detect_fraud_rings(self, df):
+        """
+        Detect potential fraud rings using community detection
+        """
+        import networkx as nx
+        from networkx.algorithms import community
+        
+        # Create NetworkX graph
+        G = nx.Graph()
+        
+        # Add nodes
+        customers = df['Customer Name'].unique()
+        G.add_nodes_from(customers)
+        
+        # Add edges based on suspicious patterns
+        # Same security, similar time, similar amount
+        for (date, security), group in df.groupby(['Date', 'Security ID']):
+            if len(group) > 1:
+                customers_in_group = group['Customer Name'].tolist()
+                amounts = group['Amount'].abs().tolist()
+                
+                # Check if amounts are suspiciously similar
+                for i in range(len(customers_in_group)):
+                    for j in range(i+1, len(customers_in_group)):
+                        amount_ratio = amounts[i] / amounts[j] if amounts[j] != 0 else 0
+                        if 0.9 < amount_ratio < 1.1:  # Within 10%
+                            G.add_edge(customers_in_group[i], customers_in_group[j], 
+                                     weight=1.0, date=date, security=security)
+                            
+        # Detect communities
+        communities_generator = community.girvan_newman(G)
+        top_level_communities = next(communities_generator)
+        
+        # Analyze suspicious communities
+        fraud_rings = []
+        for comm in top_level_communities:
+            if len(comm) > 2:  # At least 3 members
+                comm_data = df[df['Customer Name'].isin(comm)]
+                
+                # Calculate suspicion score
+                suspicion_score = 0
+                
+                # Similar trading times
+                time_spread = comm_data.groupby('Date').size().std()
+                if time_spread < 2:  # Low spread = coordinated
+                    suspicion_score += 1
+                    
+                # Similar amounts
+                amount_cv = comm_data.groupby('Customer Name')['Amount'].apply(
+                    lambda x: x.abs().std() / x.abs().mean()
+                ).mean()
+                if amount_cv < 0.1:  # Low variation
+                    suspicion_score += 1
+                    
+                # Same securities
+                security_overlap = comm_data.groupby('Security ID')['Customer Name'].nunique().mean()
+                if security_overlap > len(comm) * 0.8:
+                    suspicion_score += 1
+                    
+                if suspicion_score >= 2:
+                    fraud_rings.append({
+                        'members': list(comm),
+                        'suspicion_score': suspicion_score,
+                        'total_volume': comm_data['Amount'].abs().sum(),
+                        'pattern': 'Coordinated trading detected'
+                    })
+                    
+        return fraud_rings
+
+# ============================================================================
+# 3. REINFORCEMENT LEARNING FOR DYNAMIC PRICING
+# ============================================================================
+
+class TradingEnvironment(gym.Env):
+    """
+    RL environment for dynamic commission pricing
+    """
+    
+    def __init__(self, df, initial_commission=0.002):
+        super(TradingEnvironment, self).__init__()
+        
+        self.df = df
+        self.initial_commission = initial_commission
+        self.current_commission = initial_commission
+        self.current_step = 0
+        self.max_steps = 100
+        
+        # Action space: adjust commission rate
+        self.action_space = spaces.Discrete(5)  # -2%, -1%, 0%, +1%, +2%
+        
+        # Observation space: market conditions
+        self.observation_space = spaces.Box(
+            low=0, high=np.inf, shape=(10,), dtype=np.float32
+        )
+        
+        # Initialize state
+        self.reset()
+        
+    def reset(self):
+        self.current_step = 0
+        self.current_commission = self.initial_commission
+        self.total_revenue = 0
+        self.total_volume = 0
+        
+        return self._get_observation()
+        
+    def _get_observation(self):
+        """Get current market state"""
+        # Look at recent trading patterns
+        recent_data = self.df.iloc[-1000:]  # Last 1000 trades
+        
+        obs = np.array([
+            recent_data['Amount'].abs().mean(),  # Average trade size
+            recent_data['Amount'].abs().std(),   # Trade size volatility
+            len(recent_data),                     # Trade frequency
+            (recent_data['Investment'] == 'Buy').mean(),  # Buy ratio
+            recent_data['Customer Name'].nunique(),  # Active customers
+            self.current_commission * 1000,       # Current commission (scaled)
+            self.total_revenue,                   # Cumulative revenue
+            self.total_volume,                    # Cumulative volume
+            self.current_step / self.max_steps,  # Time progress
+            recent_data.groupby('Security Type').size().std()  # Product diversity
+        ], dtype=np.float32)
+        
+        return obs
+        
+    def step(self, action):
+        """Execute action and return results"""
+        # Adjust commission based on action
+        commission_changes = [-0.0002, -0.0001, 0, 0.0001, 0.0002]
+        self.current_commission += commission_changes[action]
+        self.current_commission = np.clip(self.current_commission, 0.0005, 0.005)
+        
+        # Simulate market response
+        # Lower commission -> more volume, higher commission -> less volume
+        base_volume = self.df.iloc[self.current_step:self.current_step+100]['Amount'].abs().sum()
+        
+        # Price elasticity model
+        elasticity = -2.0  # 1% price increase -> 2% volume decrease
+        commission_ratio = self.current_commission / self.initial_commission
+        volume_multiplier = (1 + elasticity * (commission_ratio - 1))
+        
+        actual_volume = base_volume * volume_multiplier
+        revenue = actual_volume * self.current_commission
+        
+        self.total_revenue += revenue
+        self.total_volume += actual_volume
+        self.current_step += 1
+        
+        # Calculate reward
+        # Balance between revenue and volume
+        reward = revenue - 0.1 * abs(commission_ratio - 1)  # Penalty for extreme prices
+        
+        # Check if done
+        done = self.current_step >= self.max_steps
+        
+        # Info for debugging
+        info = {
+            'commission': self.current_commission,
+            'volume': actual_volume,
+            'revenue': revenue
+        }
+        
+        return self._get_observation(), reward, done, info
+
+class DynamicPricingRL:
+    """
+    RL-based dynamic pricing system
+    """
+    
+    def __init__(self, df):
+        self.df = df
+        self.env = TradingEnvironment(df)
+        self.model = None
+        
+    def train_pricing_agent(self, total_timesteps=10000):
+        """
+        Train RL agent for optimal pricing
+        """
+        # Use PPO algorithm
+        self.model = PPO(
+            'MlpPolicy',
+            self.env,
+            verbose=1,
+            learning_rate=0.0003,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            tensorboard_log="./pricing_tensorboard/"
+        )
+        
+        # Train model
+        self.model.learn(total_timesteps=total_timesteps)
+        
+        # Save model
+        self.model.save("dynamic_pricing_model")
+        
+        return self.model
+        
+    def optimize_commission_schedule(self, market_conditions):
+        """
+        Generate optimal commission schedule based on market conditions
+        """
+        obs = self.env.reset()
+        
+        commission_schedule = []
+        
+        for _ in range(self.env.max_steps):
+            action, _states = self.model.predict(obs, deterministic=True)
+            obs, reward, done, info = self.env.step(action)
+            
+            commission_schedule.append({
+                'step': self.env.current_step,
+                'commission': info['commission'],
+                'expected_volume': info['volume'],
+                'expected_revenue': info['revenue']
             })
+            
+            if done:
+                break
+                
+        return pd.DataFrame(commission_schedule)
+        
+    def simulate_pricing_strategies(self):
+        """
+        Compare different pricing strategies
+        """
+        strategies = {
+            'fixed_low': lambda: 0.001,
+            'fixed_medium': lambda: 0.002,
+            'fixed_high': lambda: 0.003,
+            'rl_optimized': self.model
+        }
+        
+        results = {}
+        
+        for name, strategy in strategies.items():
+            env = TradingEnvironment(self.df)
+            obs = env.reset()
+            
+            total_revenue = 0
+            total_volume = 0
+            
+            for _ in range(env.max_steps):
+                if name == 'rl_optimized':
+                    action, _ = strategy.predict(obs, deterministic=True)
+                else:
+                    # Fixed strategies
+                    env.current_commission = strategy()
+                    action = 2  # No change
+                    
+                obs, reward, done, info = env.step(action)
+                total_revenue += info['revenue']
+                total_volume += info['volume']
+                
+                if done:
+                    break
+                    
+            results[name] = {
+                'total_revenue': total_revenue,
+                'total_volume': total_volume,
+                'avg_commission': total_revenue / total_volume if total_volume > 0 else 0
+            }
+            
+        return pd.DataFrame(results).T
+
+# ============================================================================
+# 4. BAYESIAN OPTIMIZATION FOR CAMPAIGN TARGETING
+# ============================================================================
+
+class BayesianCampaignOptimizer:
+    """
+    Bayesian optimization for marketing campaign targeting
+    """
     
-    customer_df = pd.DataFrame(customer_metrics)
+    def __init__(self, df, customer_features):
+        self.df = df
+        self.customer_features = customer_features
+        
+    def create_response_model(self):
+        """
+        Create probabilistic model for campaign response
+        """
+        # Simulate historical campaign data (in practice, use real data)
+        campaign_history = []
+        
+        for _ in range(1000):  # 1000 historical campaigns
+            # Random campaign parameters
+            params = {
+                'discount_rate': np.random.uniform(0.05, 0.30),
+                'min_volume': np.random.uniform(10000, 100000),
+                'product_focus': np.random.choice(['Stocks', 'Bonds', 'Mixed']),
+                'channel': np.random.choice(['Email', 'Phone', 'Both']),
+                'timing': np.random.choice(['Morning', 'Afternoon', 'Evening'])
+            }
+            
+            # Simulate response (complex non-linear function)
+            response_rate = self._simulate_response(params)
+            
+            campaign_history.append({**params, 'response_rate': response_rate})
+            
+        self.campaign_df = pd.DataFrame(campaign_history)
+        
+        # Build response prediction model
+        from sklearn.ensemble import RandomForestRegressor
+        
+        # Encode categorical variables
+        X = pd.get_dummies(self.campaign_df.drop('response_rate', axis=1))
+        y = self.campaign_df['response_rate']
+        
+        self.response_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.response_model.fit(X, y)
+        
+        self.feature_columns = X.columns
+        
+    def _simulate_response(self, params):
+        """Simulate campaign response (replace with real data)"""
+        base_response = 0.05
+        
+        # Discount effect (non-linear)
+        discount_effect = params['discount_rate'] * 2 - params['discount_rate']**2 * 3
+        
+        # Volume threshold effect
+        volume_effect = 0.1 if params['min_volume'] < 50000 else -0.05
+        
+        # Product effect
+        product_effects = {'Stocks': 0.02, 'Bonds': 0.01, 'Mixed': 0.03}
+        product_effect = product_effects[params['product_focus']]
+        
+        # Channel effect
+        channel_effects = {'Email': 0.01, 'Phone': 0.03, 'Both': 0.04}
+        channel_effect = channel_effects[params['channel']]
+        
+        # Add noise
+        noise = np.random.normal(0, 0.02)
+        
+        response_rate = base_response + discount_effect + volume_effect + \
+                       product_effect + channel_effect + noise
+                       
+        return np.clip(response_rate, 0, 0.3)
+        
+    def optimize_campaign(self, target_segment, budget=100000):
+        """
+        Use Bayesian optimization to find optimal campaign parameters
+        """
+        def objective(trial):
+            # Suggest parameters
+            params = {
+                'discount_rate': trial.suggest_float('discount_rate', 0.05, 0.30),
+                'min_volume': trial.suggest_float('min_volume', 10000, 100000),
+                'product_focus': trial.suggest_categorical('product_focus', 
+                                                          ['Stocks', 'Bonds', 'Mixed']),
+                'channel': trial.suggest_categorical('channel', 
+                                                   ['Email', 'Phone', 'Both']),
+                'timing': trial.suggest_categorical('timing', 
+                                                  ['Morning', 'Afternoon', 'Evening'])
+            }
+            
+            # Encode parameters
+            param_df = pd.DataFrame([params])
+            X = pd.get_dummies(param_df)
+            
+            # Ensure all columns are present
+            for col in self.feature_columns:
+                if col not in X.columns:
+                    X[col] = 0
+            X = X[self.feature_columns]
+            
+            # Predict response
+            predicted_response = self.response_model.predict(X)[0]
+            
+            # Calculate expected profit
+            # Cost calculation
+            channel_costs = {'Email': 1, 'Phone': 10, 'Both': 11}
+            cost_per_customer = channel_costs[params['channel']]
+            
+            # Expected revenue
+            avg_customer_value = 1000  # Average revenue per converted customer
+            expected_conversions = predicted_response * (budget / cost_per_customer)
+            expected_revenue = expected_conversions * avg_customer_value * (1 - params['discount_rate'])
+            expected_cost = budget
+            
+            expected_profit = expected_revenue - expected_cost
+            
+            return expected_profit
+            
+        # Run optimization
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=100)
+        
+        # Get best parameters
+        best_params = study.best_params
+        best_value = study.best_value
+        
+        print(f"Best campaign parameters:")
+        for param, value in best_params.items():
+            print(f"  {param}: {value}")
+        print(f"Expected profit: ${best_value:,.2f}")
+        
+        # Visualize optimization process
+        import matplotlib.pyplot as plt
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        
+        # Parameter importance
+        importance = optuna.importance.get_param_importances(study)
+        axes[0, 0].bar(importance.keys(), importance.values())
+        axes[0, 0].set_title('Parameter Importance')
+        axes[0, 0].set_xlabel('Parameter')
+        axes[0, 0].set_ylabel('Importance')
+        axes[0, 0].tick_params(axis='x', rotation=45)
+        
+        # Optimization history
+        axes[0, 1].plot(study.trials_dataframe()['value'])
+        axes[0, 1].set_title('Optimization History')
+        axes[0, 1].set_xlabel('Trial')
+        axes[0, 1].set_ylabel('Expected Profit')
+        
+        # Discount rate vs response
+        discount_rates = [t.params['discount_rate'] for t in study.trials]
+        values = [t.value for t in study.trials]
+        axes[1, 0].scatter(discount_rates, values, alpha=0.5)
+        axes[1, 0].set_xlabel('Discount Rate')
+        axes[1, 0].set_ylabel('Expected Profit')
+        axes[1, 0].set_title('Discount Rate Impact')
+        
+        # Channel performance
+        channel_performance = {}
+        for t in study.trials:
+            channel = t.params['channel']
+            if channel not in channel_performance:
+                channel_performance[channel] = []
+            channel_performance[channel].append(t.value)
+            
+        axes[1, 1].boxplot(channel_performance.values(), labels=channel_performance.keys())
+        axes[1, 1].set_title('Performance by Channel')
+        axes[1, 1].set_ylabel('Expected Profit')
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return best_params, best_value
+
+# ============================================================================
+# 5. ENSEMBLE MODEL WITH AUTOMATED STACKING
+# ============================================================================
+
+class AutoMLEnsemble:
+    """
+    Automated ensemble learning with stacking
+    """
     
-    # Filter out customers with minimal changes
-    significant_customers = customer_df[
-        (customer_df['Foreign_Abs_Change_%'] > 5) | 
-        (customer_df['Volume_Abs_Change_%'] > 10)
-    ].copy()
+    def __init__(self):
+        self.base_models = {}
+        self.meta_model = None
+        self.feature_importance_ensemble = None
+        
+    def create_base_models(self):
+        """
+        Create diverse base models
+        """
+        from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+        from sklearn.linear_model import ElasticNet, BayesianRidge
+        from sklearn.svm import SVR
+        from sklearn.neural_network import MLPRegressor
+        import xgboost as xgb
+        import lightgbm as lgb
+        import catboost as cb
+        
+        self.base_models = {
+            'rf': RandomForestRegressor(
+                n_estimators=300,
+                max_depth=10,
+                min_samples_split=5,
+                random_state=42
+            ),
+            'gbm': GradientBoostingRegressor(
+                n_estimators=300,
+                learning_rate=0.05,
+                max_depth=6,
+                random_state=42
+            ),
+            'xgb': xgb.XGBRegressor(
+                n_estimators=300,
+                learning_rate=0.05,
+                max_depth=6,
+                random_state=42
+            ),
+            'lgb': lgb.LGBMRegressor(
+                n_estimators=300,
+                learning_rate=0.05,
+                num_leaves=31,
+                random_state=42
+            ),
+            'catboost': cb.CatBoostRegressor(
+                iterations=300,
+                learning_rate=0.05,
+                depth=6,
+                random_state=42,
+                verbose=False
+            ),
+            'elastic': ElasticNet(
+                alpha=0.1,
+                l1_ratio=0.5,
+                random_state=42
+            ),
+            'bayesian': BayesianRidge(),
+            'nn': MLPRegressor(
+                hidden_layer_sizes=(100, 50),
+                activation='relu',
+                solver='adam',
+                alpha=0.001,
+                learning_rate='adaptive',
+                max_iter=500,
+                random_state=42
+            )
+        }
+        
+    def train_ensemble(self, X_train, y_train, X_val, y_val):
+        """
+        Train ensemble with automated stacking
+        """
+        from sklearn.model_selection import cross_val_predict
+        
+        # Train base models and collect predictions
+        base_predictions_train = np.zeros((len(X_train), len(self.base_models)))
+        base_predictions_val = np.zeros((len(X_val), len(self.base_models)))
+        
+        print("Training base models...")
+        for i, (name, model) in enumerate(self.base_models.items()):
+            print(f"  Training {name}...")
+            
+            # Train model
+            model.fit(X_train, y_train)
+            
+            # Get out-of-fold predictions for stacking
+            oof_preds = cross_val_predict(model, X_train, y_train, cv=5)
+            base_predictions_train[:, i] = oof_preds
+            
+            # Validation predictions
+            base_predictions_val[:, i] = model.predict(X_val)
+            
+            # Evaluate
+            val_score = np.sqrt(np.mean((base_predictions_val[:, i] - y_val) ** 2))
+            print(f"    {name} RMSE: {val_score:.4f}")
+            
+        # Train meta-model
+        print("\nTraining meta-model...")
+        from sklearn.linear_model import LinearRegression
+        self.meta_model = LinearRegression()
+        self.meta_model.fit(base_predictions_train, y_train)
+        
+        # Final ensemble predictions
+        ensemble_preds = self.meta_model.predict(base_predictions_val)
+        ensemble_rmse = np.sqrt(np.mean((ensemble_preds - y_val) ** 2))
+        print(f"Ensemble RMSE: {ensemble_rmse:.4f}")
+        
+        # Calculate ensemble weights
+        weights = self.meta_model.coef_
+        weight_df = pd.DataFrame({
+            'Model': list(self.base_models.keys()),
+            'Weight': weights
+        }).sort_values('Weight', ascending=False)
+        
+        print("\nEnsemble Weights:")
+        print(weight_df)
+        
+        return ensemble_preds, weight_df
+        
+    def predict(self, X):
+        """
+        Make predictions with ensemble
+        """
+        base_predictions = np.zeros((len(X), len(self.base_models)))
+        
+        for i, (name, model) in enumerate(self.base_models.items()):
+            base_predictions[:, i] = model.predict(X)
+            
+        return self.meta_model.predict(base_predictions)
+        
+    def explain_predictions(self, X, feature_names):
+        """
+        Explain ensemble predictions using SHAP
+        """
+        # Create a wrapper for ensemble
+        def ensemble_predict(X):
+            return self.predict(X)
+            
+        # Use SHAP to explain
+        explainer = shap.Explainer(ensemble_predict, X)
+        shap_values = explainer(X[:100])  # Explain first 100 predictions
+        
+        # Visualize
+        plt.figure(figsize=(12, 6))
+        shap.summary_plot(shap_values, X[:100], feature_names=feature_names, show=False)
+        plt.title('SHAP Feature Importance - Ensemble Model')
+        plt.tight_layout()
+        plt.show()
+        
+        # Feature importance across all base models
+        importance_dict = {}
+        
+        for name, model in self.base_models.items():
+            if hasattr(model, 'feature_importances_'):
+                importance_dict[name] = model.feature_importances_
+                
+        if importance_dict:
+            importance_df = pd.DataFrame(importance_dict, index=feature_names)
+            
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(importance_df, cmap='YlOrRd', annot=True, fmt='.3f')
+            plt.title('Feature Importance Across Base Models')
+            plt.tight_layout()
+            plt.show()
+
+# ============================================================================
+# 6. MODEL MONITORING & DRIFT DETECTION
+# ============================================================================
+
+class ModelMonitoring:
+    """
+    Production model monitoring with drift detection
+    """
     
-    if len(significant_customers) < 50:
-        print(f"Warning: Only {len(significant_customers)} customers show significant changes")
-        significant_customers = customer_df.copy()
+    def __init__(self, reference_data, model):
+        self.reference_data = reference_data
+        self.model = model
+        self.monitoring_history = []
+        
+    def create_monitoring_dashboard(self, production_data):
+        """
+        Create comprehensive monitoring dashboard
+        """
+        # 1. Data drift detection
+        data_drift_report = Report(metrics=[
+            DataDriftPreset(),
+        ])
+        
+        data_drift_report.run(
+            reference_data=self.reference_data,
+            current_data=production_data
+        )
+        
+        # 2. Data quality checks
+        quality_report = Report(metrics=[
+            DataQualityPreset(),
+        ])
+        
+        quality_report.run(
+            reference_data=self.reference_data,
+            current_data=production_data
+        )
+        
+        # 3. Model performance monitoring
+        performance_metrics = self._calculate_performance_metrics(production_data)
+        
+        # 4. Feature drift detection
+        feature_drift = self._detect_feature_drift(production_data)
+        
+        # Create monitoring record
+        monitoring_record = {
+            'timestamp': datetime.now(),
+            'data_drift_detected': self._check_drift_threshold(data_drift_report),
+            'performance_metrics': performance_metrics,
+            'feature_drift': feature_drift,
+            'alerts': self._generate_alerts(performance_metrics, feature_drift)
+        }
+        
+        self.monitoring_history.append(monitoring_record)
+        
+        # Visualize monitoring dashboard
+        self._create_monitoring_plots(performance_metrics, feature_drift)
+        
+        return monitoring_record
+        
+    def _calculate_performance_metrics(self, production_data):
+        """Calculate model performance metrics"""
+        if 'target' in production_data.columns:
+            predictions = self.model.predict(production_data.drop('target', axis=1))
+            
+            from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+            
+            metrics = {
+                'mae': mean_absolute_error(production_data['target'], predictions),
+                'rmse': np.sqrt(mean_squared_error(production_data['target'], predictions)),
+                'r2': r2_score(production_data['target'], predictions),
+                'prediction_mean': predictions.mean(),
+                'prediction_std': predictions.std()
+            }
+        else:
+            # If no labels, monitor prediction distribution
+            predictions = self.model.predict(production_data)
+            metrics = {
+                'prediction_mean': predictions.mean(),
+                'prediction_std': predictions.std(),
+                'prediction_min': predictions.min(),
+                'prediction_max': predictions.max()
+            }
+            
+        return metrics
+        
+    def _detect_feature_drift(self, production_data):
+        """Detect drift in individual features"""
+        from scipy import stats
+        
+        drift_results = {}
+        
+        for column in self.reference_data.columns:
+            if column in production_data.columns:
+                # Kolmogorov-Smirnov test
+                ks_statistic, p_value = stats.ks_2samp(
+                    self.reference_data[column],
+                    production_data[column]
+                )
+                
+                drift_results[column] = {
+                    'ks_statistic': ks_statistic,
+                    'p_value': p_value,
+                    'drift_detected': p_value < 0.05
+                }
+                
+        return drift_results
+        
+    def _check_drift_threshold(self, drift_report):
+        """Check if drift exceeds threshold"""
+        # This would parse the actual drift report
+        # For now, return a simulated value
+        return np.random.random() > 0.8
+        
+    def _generate_alerts(self, performance_metrics, feature_drift):
+        """Generate alerts based on monitoring results"""
+        alerts = []
+        
+        # Performance degradation alert
+        if 'rmse' in performance_metrics:
+            baseline_rmse = 1000  # Set your baseline
+            if performance_metrics['rmse'] > baseline_rmse * 1.2:
+                alerts.append({
+                    'type': 'PERFORMANCE_DEGRADATION',
+                    'severity': 'HIGH',
+                    'message': f"RMSE increased by {(performance_metrics['rmse']/baseline_rmse - 1)*100:.1f}%"
+                })
+                
+        # Feature drift alerts
+        drifted_features = [f for f, d in feature_drift.items() if d['drift_detected']]
+        if len(drifted_features) > len(feature_drift) * 0.3:
+            alerts.append({
+                'type': 'SIGNIFICANT_DRIFT',
+                'severity': 'MEDIUM',
+                'message': f"{len(drifted_features)} features showing significant drift"
+            })
+            
+        return alerts
+        
+    def _create_monitoring_plots(self, performance_metrics, feature_drift):
+        """Create monitoring visualizations"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Performance metrics over time
+        if len(self.monitoring_history) > 1:
+            metrics_df = pd.DataFrame([h['performance_metrics'] for h in self.monitoring_history])
+            if 'rmse' in metrics_df.columns:
+                axes[0, 0].plot(metrics_df.index, metrics_df['rmse'], marker='o')
+                axes[0, 0].set_title('Model RMSE Over Time')
+                axes[0, 0].set_xlabel('Monitoring Period')
+                axes[0, 0].set_ylabel('RMSE')
+                
+        # Feature drift heatmap
+        drift_df = pd.DataFrame(feature_drift).T
+        drift_values = drift_df['ks_statistic'].values.reshape(-1, 1)
+        
+        axes[0, 1].imshow(drift_values.T, cmap='RdYlGn_r', aspect='auto')
+        axes[0, 1].set_yticks([0])
+        axes[0, 1].set_yticklabels(['KS Statistic'])
+        axes[0, 1].set_xticks(range(len(drift_df)))
+        axes[0, 1].set_xticklabels(drift_df.index, rotation=45, ha='right')
+        axes[0, 1].set_title('Feature Drift Detection')
+        
+        # Prediction distribution
+        if len(self.monitoring_history) > 1:
+            pred_means = [h['performance_metrics']['prediction_mean'] for h in self.monitoring_history]
+            pred_stds = [h['performance_metrics']['prediction_std'] for h in self.monitoring_history]
+            
+            x = range(len(pred_means))
+            axes[1, 0].plot(x, pred_means, 'b-', label='Mean')
+            axes[1, 0].fill_between(x, 
+                                   np.array(pred_means) - np.array(pred_stds),
+                                   np.array(pred_means) + np.array(pred_stds),
+                                   alpha=0.3, label='±1 STD')
+            axes[1, 0].set_title('Prediction Distribution Over Time')
+            axes[1, 0].set_xlabel('Monitoring Period')
+            axes[1, 0].set_ylabel('Prediction Value')
+            axes[1, 0].legend()
+            
+        # Alert timeline
+        all_alerts = []
+        for i, h in enumerate(self.monitoring_history):
+            for alert in h['alerts']:
+                all_alerts.append({'period': i, 'severity': alert['severity']})
+                
+        if all_alerts:
+            alert_df = pd.DataFrame(all_alerts)
+            severity_colors = {'HIGH': 'red', 'MEDIUM': 'orange', 'LOW': 'yellow'}
+            
+            for severity in ['HIGH', 'MEDIUM', 'LOW']:
+                severity_alerts = alert_df[alert_df['severity'] == severity]
+                if not severity_alerts.empty:
+                    axes[1, 1].scatter(severity_alerts['period'], 
+                                     [severity] * len(severity_alerts),
+                                     c=severity_colors[severity], s=100, label=severity)
+                    
+            axes[1, 1].set_title('Alert Timeline')
+            axes[1, 1].set_xlabel('Monitoring Period')
+            axes[1, 1].set_ylabel('Alert Severity')
+            axes[1, 1].legend()
+            
+        plt.tight_layout()
+        plt.show()
+
+# ============================================================================
+# 7. PRODUCTION DEPLOYMENT PIPELINE
+# ============================================================================
+
+class ProductionPipeline:
+    """
+    End-to-end production deployment pipeline
+    """
     
-    # Perform clustering
-    features = ['Foreign_Change_%', 'Volume_Change_%']
-    X = significant_customers[features].fillna(0)
+    def __init__(self):
+        self.models = {}
+        self.preprocessors = {}
+        self.monitoring = None
+        
+    def create_training_pipeline(self, df):
+        """
+        Create complete training pipeline with MLflow tracking
+        """
+        mlflow.set_experiment("banking_analytics_production")
+        
+        with mlflow.start_run():
+            # Log parameters
+            mlflow.log_param("data_shape", df.shape)
+            mlflow.log_param("date_range", f"{df['Date'].min()} to {df['Date'].max()}")
+            
+            # Feature engineering
+            print("Engineering features...")
+            feature_pipeline = self._create_feature_pipeline()
+            X, y = feature_pipeline.fit_transform(df)
+            
+            # Split data
+            from sklearn.model_selection import train_test_split
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+            
+            # Train ensemble model
+            print("Training ensemble model...")
+            ensemble = AutoMLEnsemble()
+            ensemble.create_base_models()
+            
+            X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+                X_train, y_train, test_size=0.2, random_state=42
+            )
+            
+            ensemble_preds, weights = ensemble.train_ensemble(
+                X_train_split, y_train_split, X_val_split, y_val_split
+            )
+            
+            # Evaluate on test set
+            test_preds = ensemble.predict(X_test)
+            test_rmse = np.sqrt(np.mean((test_preds - y_test) ** 2))
+            
+            # Log metrics
+            mlflow.log_metric("test_rmse", test_rmse)
+            mlflow.log_metric("ensemble_models", len(ensemble.base_models))
+            
+            # Save models
+            for name, model in ensemble.base_models.items():
+                mlflow.sklearn.log_model(model, f"base_model_{name}")
+                
+            mlflow.sklearn.log_model(ensemble.meta_model, "meta_model")
+            
+            # Create model package
+            model_package = {
+                'ensemble': ensemble,
+                'feature_pipeline': feature_pipeline,
+                'feature_names': X.columns.tolist(),
+                'model_version': datetime.now().strftime("%Y%m%d_%H%M%S")
+            }
+            
+            # Save complete package
+            joblib.dump(model_package, 'production_model_package.pkl')
+            mlflow.log_artifact('production_model_package.pkl')
+            
+            print(f"Model training complete. Test RMSE: {test_rmse:.4f}")
+            
+            return model_package
+            
+    def _create_feature_pipeline(self):
+        """Create feature engineering pipeline"""
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.impute import SimpleImputer
+        
+        class FeatureEngineering:
+            def fit(self, df):
+                # Store statistics for transformation
+                self.stats = {
+                    'volume_mean': df['Amount'].abs().mean(),
+                    'volume_std': df['Amount'].abs().std()
+                }
+                return self
+                
+            def fit_transform(self, df):
+                self.fit(df)
+                return self.transform(df)
+                
+            def transform(self, df):
+                # Create features
+                features = pd.DataFrame()
+                
+                # Aggregate by customer
+                customer_features = df.groupby('Customer Name').agg({
+                    'Amount': [
+                        lambda x: x.abs().sum(),
+                        lambda x: x.abs().mean(),
+                        'count'
+                    ],
+                    'Security Type': 'nunique',
+                    'Investment': lambda x: (x == 'Buy').mean()
+                })
+                
+                customer_features.columns = [
+                    'total_volume', 'avg_trade', 'trade_count',
+                    'product_diversity', 'buy_ratio'
+                ]
+                
+                # Normalize
+                customer_features['volume_normalized'] = (
+                    customer_features['total_volume'] - self.stats['volume_mean']
+                ) / self.stats['volume_std']
+                
+                # Target: Next period volume (for demo, use current volume)
+                y = customer_features['total_volume']
+                
+                return customer_features, y
+                
+        return FeatureEngineering()
+        
+    def deploy_to_production(self, model_package):
+        """
+        Deploy model to production with monitoring
+        """
+        print("Deploying to production...")
+        
+        # 1. Version control
+        model_version = model_package['model_version']
+        
+        # 2. Create API endpoint
+        from flask import Flask, request, jsonify
+        
+        app = Flask(__name__)
+        
+        @app.route('/predict', methods=['POST'])
+        def predict():
+            try:
+                # Get data
+                data = request.json
+                
+                # Transform features
+                features = model_package['feature_pipeline'].transform(pd.DataFrame([data]))
+                
+                # Make prediction
+                prediction = model_package['ensemble'].predict(features)
+                
+                # Log prediction
+                self._log_prediction(data, prediction[0])
+                
+                return jsonify({
+                    'prediction': float(prediction[0]),
+                    'model_version': model_version,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+            except Exception as e:
+                return jsonify({'error': str(e)}), 400
+                
+        # 3. Create batch prediction service
+        @app.route('/batch_predict', methods=['POST'])
+        def batch_predict():
+            try:
+                # Get batch data
+                batch_data = pd.DataFrame(request.json['data'])
+                
+                # Transform features
+                features, _ = model_package['feature_pipeline'].transform(batch_data)
+                
+                # Make predictions
+                predictions = model_package['ensemble'].predict(features)
+                
+                return jsonify({
+                    'predictions': predictions.tolist(),
+                    'model_version': model_version,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+            except Exception as e:
+                return jsonify({'error': str(e)}), 400
+                
+        # 4. Health check endpoint
+        @app.route('/health', methods=['GET'])
+        def health():
+            return jsonify({
+                'status': 'healthy',
+                'model_version': model_version,
+                'uptime': 'calculating...'
+            })
+            
+        print(f"Model deployed. Version: {model_version}")
+        print("API endpoints available:")
+        print("  POST /predict - Single prediction")
+        print("  POST /batch_predict - Batch predictions")
+        print("  GET /health - Health check")
+        
+        return app
+        
+    def _log_prediction(self, input_data, prediction):
+        """Log predictions for monitoring"""
+        # In production, this would write to a database or monitoring system
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'input': input_data,
+            'prediction': prediction
+        }
+        # Write to monitoring system
+        
+    def create_ab_testing_framework(self):
+        """
+        Create A/B testing framework for model comparison
+        """
+        class ABTestFramework:
+            def __init__(self):
+                self.models = {}
+                self.allocation = {}
+                self.results = []
+                
+            def add_model(self, name, model, allocation=0.5):
+                """Add model to A/B test"""
+                self.models[name] = model
+                self.allocation[name] = allocation
+                
+            def route_request(self, request_id):
+                """Route request to appropriate model"""
+                # Simple random allocation
+                rand = hash(request_id) % 100 / 100
+                
+                cumulative = 0
+                for name, alloc in self.allocation.items():
+                    cumulative += alloc
+                    if rand < cumulative:
+                        return name
+                        
+                return list(self.models.keys())[-1]
+                
+            def predict(self, data, request_id):
+                """Make prediction with A/B test routing"""
+                model_name = self.route_request(request_id)
+                model = self.models[model_name]
+                
+                prediction = model.predict(data)
+                
+                # Log for analysis
+                self.results.append({
+                    'request_id': request_id,
+                    'model': model_name,
+                    'prediction': prediction,
+                    'timestamp': datetime.now()
+                })
+                
+                return prediction, model_name
+                
+            def analyze_results(self):
+                """Analyze A/B test results"""
+                results_df = pd.DataFrame(self.results)
+                
+                # Calculate metrics by model
+                model_stats = results_df.groupby('model').agg({
+                    'prediction': ['mean', 'std', 'count']
+                })
+                
+                print("A/B Test Results:")
+                print(model_stats)
+                
+                # Statistical significance test
+                if len(self.models) == 2:
+                    model_names = list(self.models.keys())
+                    group_a = results_df[results_df['model'] == model_names[0]]['prediction']
+                    group_b = results_df[results_df['model'] == model_names[1]]['prediction']
+                    
+                    from scipy import stats
+                    t_stat, p_value = stats.ttest_ind(group_a, group_b)
+                    
+                    print(f"\nStatistical Test:")
+                    print(f"t-statistic: {t_stat:.4f}")
+                    print(f"p-value: {p_value:.4f}")
+                    
+                    if p_value < 0.05:
+                        print("Result: Significant difference detected")
+                    else:
+                        print("Result: No significant difference")
+                        
+        return ABTestFramework()
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def run_production_ml_pipeline(df):
+    """
+    Run complete production ML pipeline
+    """
+    print("="*80)
+    print("PRODUCTION ML PIPELINE")
+    print("="*80)
     
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # 1. Real-time scoring system
+    print("\n1. Setting up real-time scoring...")
+    scoring_system = RealTimeScoring({}, redis_host='localhost')
+    scoring_system.feature_pipeline = scoring_system.create_feature_pipeline(df)
     
-    n_clusters = min(4, max(2, len(significant_customers) // 50))
+    # 2. Fraud detection with GNN
+    print("\n2. Training fraud detection GNN...")
+    fraud_detector = FraudDetectionGNN()
+    graph_data, customer_mapping = fraud_detector.create_transaction_graph(df)
+    fraud_model = fraud_detector.train_fraud_detector(graph_data)
+    fraud_rings = fraud_detector.detect_fraud_rings(df)
     
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    significant_customers['Cluster'] = kmeans.fit_predict(X_scaled)
+    if fraud_rings:
+        print(f"\nDetected {len(fraud_rings)} potential fraud rings")
+        for ring in fraud_rings[:3]:
+            print(f"  - {len(ring['members'])} members, volume: ${ring['total_volume']:,.0f}")
+            
+    # 3. Dynamic pricing with RL
+    print("\n3. Training dynamic pricing agent...")
+    pricing_system = DynamicPricingRL(df)
+    pricing_model = pricing_system.train_pricing_agent(total_timesteps=5000)
     
-    # Name clusters based on behavior patterns
-    cluster_centers = pd.DataFrame(
-        scaler.inverse_transform(kmeans.cluster_centers_), 
-        columns=features
+    # Compare strategies
+    strategy_comparison = pricing_system.simulate_pricing_strategies()
+    print("\nPricing Strategy Comparison:")
+    print(strategy_comparison)
+    
+    # 4. Campaign optimization
+    print("\n4. Optimizing marketing campaigns...")
+    campaign_optimizer = BayesianCampaignOptimizer(df, None)
+    campaign_optimizer.create_response_model()
+    best_params, expected_profit = campaign_optimizer.optimize_campaign(
+        target_segment='high_value', 
+        budget=100000
     )
     
-    cluster_names = {}
-    for i in range(n_clusters):
-        foreign_change = cluster_centers.iloc[i]['Foreign_Change_%']
-        volume_change = cluster_centers.iloc[i]['Volume_Change_%']
-        
-        if abs(foreign_change) < 5 and abs(volume_change) < 10:
-            cluster_names[i] = 'Stable Investors'
-        elif foreign_change < -10:
-            cluster_names[i] = 'Foreign Reducers'
-        elif foreign_change > 10:
-            cluster_names[i] = 'Foreign Increasers'
-        elif volume_change > 20:
-            cluster_names[i] = 'Volume Increasers'
-        elif volume_change < -20:
-            cluster_names[i] = 'Volume Reducers'
-        else:
-            cluster_names[i] = 'Moderate Adjusters'
+    # 5. Production deployment
+    print("\n5. Creating production pipeline...")
+    pipeline = ProductionPipeline()
+    model_package = pipeline.create_training_pipeline(df)
     
-    significant_customers['Cluster_Name'] = significant_customers['Cluster'].map(cluster_names)
+    # Deploy model
+    app = pipeline.deploy_to_production(model_package)
     
-    # Add back stable customers if filtered out
-    if len(significant_customers) < len(customer_df):
-        stable_customers = customer_df[
-            (customer_df['Foreign_Abs_Change_%'] <= 5) & 
-            (customer_df['Volume_Abs_Change_%'] <= 10)
-        ].copy()
-        stable_customers['Cluster'] = -1
-        stable_customers['Cluster_Name'] = 'Stable Investors'
-        
-        customer_df = pd.concat([significant_customers, stable_customers], ignore_index=True)
-    else:
-        customer_df = significant_customers
+    # 6. Set up A/B testing
+    print("\n6. Setting up A/B testing framework...")
+    ab_test = pipeline.create_ab_testing_framework()
     
-    return customer_df
-
-def statistical_significance_tests(df, event_date, window=30):
-    """Perform statistical tests for significance"""
-    event_date = pd.Timestamp(event_date)
+    # Add models to test
+    ab_test.add_model('current_model', model_package['ensemble'], allocation=0.7)
+    # ab_test.add_model('challenger_model', new_model, allocation=0.3)
     
-    # Define periods
-    pre_start = event_date - timedelta(days=window)
-    pre_end = event_date - timedelta(days=1)
-    post_start = event_date
-    post_end = event_date + timedelta(days=window)
-    
-    pre_data = df[(df['Date'] >= pre_start) & (df['Date'] <= pre_end)]
-    post_data = df[(df['Date'] >= post_start) & (df['Date'] <= post_end)]
-    
-    results = {}
-    
-    # 1. T-test for average daily trading volume (using absolute values)
-    pre_daily = pre_data.groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
-    post_daily = post_data.groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
-    
-    t_stat, p_value = stats.ttest_ind(pre_daily, post_daily)
-    results['Volume_Change'] = {
-        't_statistic': t_stat,
-        'p_value': p_value,
-        'pre_mean': pre_daily.mean(),
-        'post_mean': post_daily.mean(),
-        'percent_change': ((post_daily.mean() - pre_daily.mean()) / pre_daily.mean() * 100)
-    }
-    
-    # 2. T-test for net position changes
-    pre_net = pre_data.groupby('Date')['Net_Amount'].sum()
-    post_net = post_data.groupby('Date')['Net_Amount'].sum()
-    
-    t_stat_net, p_value_net = stats.ttest_ind(pre_net, post_net)
-    results['Net_Position_Change'] = {
-        't_statistic': t_stat_net,
-        'p_value': p_value_net,
-        'pre_mean': pre_net.mean(),
-        'post_mean': post_net.mean()
-    }
-    
-    # 3. Chi-square test for security type distribution
-    pre_security = pre_data['Security_Type'].value_counts()
-    post_security = post_data['Security_Type'].value_counts()
-    
-    all_securities = list(set(pre_security.index) | set(post_security.index))
-    pre_counts = [pre_security.get(s, 0) for s in all_securities]
-    post_counts = [post_security.get(s, 0) for s in all_securities]
-    
-    contingency_table = pd.DataFrame({
-        'Pre': pre_counts,
-        'Post': post_counts
-    }, index=all_securities)
-    
-    chi2, p_chi, dof, expected = stats.chi2_contingency(contingency_table.T)
-    results['Security_Distribution'] = {
-        'chi2_statistic': chi2,
-        'p_value': p_chi,
-        'degrees_of_freedom': dof
-    }
-    
-    return results
-
-# ==================== VISUALIZATION FUNCTIONS ====================
-
-def create_event_study_plot(event_metrics, event_name):
-    """Create event study visualization"""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle(f'Event Study: {event_name}', fontsize=16)
-    
-    # Plot 1: Daily Net Trading Amount
-    ax1 = axes[0, 0]
-    ax1.plot(event_metrics['Days_from_event'], event_metrics['Total_Net_Amount']/1e6, 
-             marker='o', markersize=4)
-    ax1.axvline(x=0, color='red', linestyle='--', label='Event Date')
-    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-    ax1.set_xlabel('Days from Event')
-    ax1.set_ylabel('Net Trading Amount (Million $)')
-    ax1.set_title('Daily Net Trading Amount')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-# Trade count
-ax2.plot(daily_metrics['Date'], daily_metrics['Trade_Count'], alpha=0.7, linewidth=1, color='blue')
-ax2.axvline(x=apr_event, color='red', linestyle='--', linewidth=2)
-ax2.set_xlabel('Date')
-ax2.set_ylabel('Number of Trades')
-ax2.set_title('Daily Trade Count')
-ax2.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('april_time_series_analysis.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# Report outliers found
-n_outliers = len(daily_metrics[(daily_metrics['Total_Net_Amount'] < lower_bound) | 
-                              (daily_metrics['Total_Net_Amount'] > upper_bound)])
-print(f"\nOutliers detected and capped: {n_outliers} days out of {len(daily_metrics)}")
-
-# 7. Seasonality Check - Compare with 2024
-print("\n7. SEASONALITY ANALYSIS - 2024 vs 2025 Comparison")
-print("-" * 40)
-
-# Define comparison periods
-event_2025 = pd.Timestamp('2025-04-02')
-event_2024 = pd.Timestamp('2024-04-02')
-window_days = 30
-
-def get_period_metrics(df, center_date, window):
-    start_date = center_date - timedelta(days=window)
-    end_date = center_date + timedelta(days=window)
-    
-    pre_data = df[(df['Date'] >= start_date) & (df['Date'] < center_date)]
-    post_data = df[(df['Date'] >= center_date) & (df['Date'] <= end_date)]
-    
-    # Calculate metrics using absolute values for volume
-    pre_volume = pre_data['Net_Amount'].abs().sum()
-    post_volume = post_data['Net_Amount'].abs().sum()
-    volume_change = ((post_volume - pre_volume) / pre_volume * 100) if pre_volume > 0 else 0
-    
-    # Net position
-    pre_net = pre_data['Net_Amount'].sum()
-    post_net = post_data['Net_Amount'].sum()
-    
-    # Security type distribution
-    pre_dist = pre_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
-    post_dist = post_data.groupby('Security_Type')['Net_Amount'].apply(lambda x: x.abs().sum())
+    print("\n" + "="*80)
+    print("PRODUCTION PIPELINE READY")
+    print("="*80)
     
     return {
-        'pre_volume': pre_volume,
-        'post_volume': post_volume,
-        'volume_change_%': volume_change,
-        'pre_net': pre_net,
-        'post_net': post_net,
-        'pre_distribution': pre_dist,
-        'post_distribution': post_dist
+        'scoring_system': scoring_system,
+        'fraud_detector': fraud_detector,
+        'pricing_model': pricing_model,
+        'campaign_optimizer': campaign_optimizer,
+        'production_pipeline': pipeline,
+        'model_package': model_package
     }
 
-# Get metrics for both years
-metrics_2024 = get_period_metrics(df, event_2024, window_days)
-metrics_2025 = get_period_metrics(df, event_2025, window_days)
-
-print(f"\nApril 2nd Period Comparison:")
-print(f"\n2024 (Same period):")
-print(f"  Pre-period volume: ${metrics_2024['pre_volume']/1e6:.2f}M")
-print(f"  Post-period volume: ${metrics_2024['post_volume']/1e6:.2f}M")
-print(f"  Volume change: {metrics_2024['volume_change_%']:.1f}%")
-print(f"  Net position change: ${(metrics_2024['post_net'] - metrics_2024['pre_net'])/1e6:.2f}M")
-
-print(f"\n2025 (Event year):")
-print(f"  Pre-period volume: ${metrics_2025['pre_volume']/1e6:.2f}M")
-print(f"  Post-period volume: ${metrics_2025['post_volume']/1e6:.2f}M")
-print(f"  Volume change: {metrics_2025['volume_change_%']:.1f}%")
-print(f"  Net position change: ${(metrics_2025['post_net'] - metrics_2025['pre_net'])/1e6:.2f}M")
-
-print(f"\nDifference-in-Differences:")
-print(f"  Volume: {metrics_2025['volume_change_%'] - metrics_2024['volume_change_%']:.1f}%")
-print(f"  This is the TRUE event impact after controlling for seasonality")
-
-# Security type changes comparison
-print(f"\nSecurity Type Distribution Changes:")
-
-# Calculate distribution changes for both years
-security_types = set(list(metrics_2024['pre_distribution'].index) + 
-                    list(metrics_2024['post_distribution'].index) +
-                    list(metrics_2025['pre_distribution'].index) + 
-                    list(metrics_2025['post_distribution'].index))
-
-comparison_table = []
-for sec_type in security_types:
-    pre_2024 = metrics_2024['pre_distribution'].get(sec_type, 0)
-    post_2024 = metrics_2024['post_distribution'].get(sec_type, 0)
-    pre_2025 = metrics_2025['pre_distribution'].get(sec_type, 0)
-    post_2025 = metrics_2025['post_distribution'].get(sec_type, 0)
+# Run example
+if __name__ == "__main__":
+    # Generate sample data (use your actual data)
+    from banking_trade_analysis import generate_dummy_trade_data
+    df = generate_dummy_trade_data(100000)  # Smaller sample for demo
     
-    # Calculate percentage of total
-    if metrics_2024['pre_volume'] > 0 and metrics_2024['post_volume'] > 0:
-        change_2024 = (post_2024/metrics_2024['post_volume'] - pre_2024/metrics_2024['pre_volume']) * 100
-    else:
-        change_2024 = 0
+    # Run production pipeline
+    production_system = run_production_ml_pipeline(df)
+    
+    print("\nProduction ML system ready for deployment!")
+
+
+
+
+
+
+
+
+==============
+
+
+
+#!/usr/bin/env python3
+"""
+Intelligent Real-time Decision System for Banking
+Integrating All Advanced Analytics Components
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import asyncio
+import aiohttp
+import websockets
+import json
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass, asdict
+from enum import Enum
+import ray
+from ray import serve
+import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import dash
+from dash import dcc, html, Input, Output, State
+import dash_bootstrap_components as dbc
+from confluent_kafka import Producer, Consumer
+import motor.motor_asyncio
+from pydantic import BaseModel, Field
+import uvicorn
+from fastapi import FastAPI, WebSocket, BackgroundTasks
+from celery import Celery
+import redis
+from prometheus_client import Counter, Histogram, Gauge, generate_latest
+import logging
+from abc import ABC, abstractmethod
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# DATA MODELS
+# ============================================================================
+
+class ActionType(Enum):
+    RETENTION_CALL = "retention_call"
+    CROSS_SELL = "cross_sell"
+    UPSELL = "upsell"
+    RISK_ALERT = "risk_alert"
+    FRAUD_INVESTIGATION = "fraud_investigation"
+    PRICING_ADJUSTMENT = "pricing_adjustment"
+    CAMPAIGN_LAUNCH = "campaign_launch"
+    NO_ACTION = "no_action"
+
+class Priority(Enum):
+    CRITICAL = 1
+    HIGH = 2
+    MEDIUM = 3
+    LOW = 4
+
+@dataclass
+class Customer:
+    id: str
+    name: str
+    industry: str
+    segment: str
+    lifetime_value: float
+    churn_risk: float
+    last_interaction: datetime
+    assigned_rm: str
+    
+@dataclass
+class Decision:
+    customer_id: str
+    action_type: ActionType
+    priority: Priority
+    confidence: float
+    expected_impact: float
+    reasoning: str
+    recommended_time: datetime
+    expiry_time: datetime
+    metadata: Dict[str, Any]
+
+@dataclass
+class RMTask:
+    task_id: str
+    rm_id: str
+    customer: Customer
+    decision: Decision
+    status: str  # pending, in_progress, completed, expired
+    created_at: datetime
+    updated_at: datetime
+    outcome: Optional[Dict[str, Any]] = None
+
+# ============================================================================
+# INTELLIGENT DECISION ENGINE
+# ============================================================================
+
+class DecisionEngine:
+    """
+    Core decision engine that orchestrates all analytics components
+    """
+    
+    def __init__(self, models, config):
+        self.models = models
+        self.config = config
+        self.decision_history = []
+        self.performance_metrics = {
+            'decisions_made': 0,
+            'successful_outcomes': 0,
+            'total_impact': 0
+        }
         
-    if metrics_2025['pre_volume'] > 0 and metrics_2025['post_volume'] > 0:
-        change_2025 = (post_2025/metrics_2025['post_volume'] - pre_2025/metrics_2025['pre_volume']) * 100
-    else:
-        change_2025 = 0
+    async def make_decision(self, customer_data: Dict, context: Dict) -> Decision:
+        """
+        Make intelligent decision based on all available models and context
+        """
+        # 1. Gather all predictions
+        predictions = await self._gather_predictions(customer_data)
+        
+        # 2. Analyze current context
+        context_factors = self._analyze_context(context)
+        
+        # 3. Apply business rules
+        constraints = self._apply_business_rules(customer_data, predictions)
+        
+        # 4. Generate decision
+        decision = self._generate_optimal_decision(
+            customer_data, predictions, context_factors, constraints
+        )
+        
+        # 5. Log decision
+        self.decision_history.append({
+            'timestamp': datetime.now(),
+            'customer_id': customer_data['id'],
+            'decision': decision,
+            'predictions': predictions
+        })
+        
+        return decision
+        
+    async def _gather_predictions(self, customer_data: Dict) -> Dict:
+        """
+        Gather predictions from all models
+        """
+        predictions = {}
+        
+        # Churn prediction
+        if 'churn_model' in self.models:
+            predictions['churn_risk'] = await self._predict_churn(customer_data)
+            
+        # CLV prediction
+        if 'clv_model' in self.models:
+            predictions['predicted_clv'] = await self._predict_clv(customer_data)
+            
+        # Anomaly detection
+        if 'anomaly_model' in self.models:
+            predictions['anomaly_score'] = await self._detect_anomaly(customer_data)
+            
+        # Network influence
+        if 'network_model' in self.models:
+            predictions['influence_score'] = await self._calculate_influence(customer_data)
+            
+        # Next best product
+        if 'product_model' in self.models:
+            predictions['next_best_product'] = await self._recommend_product(customer_data)
+            
+        return predictions
+        
+    def _analyze_context(self, context: Dict) -> Dict:
+        """
+        Analyze current business context
+        """
+        factors = {
+            'time_of_day': datetime.now().hour,
+            'day_of_week': datetime.now().weekday(),
+            'month_end': datetime.now().day > 25,
+            'market_volatility': context.get('market_volatility', 'normal'),
+            'rm_availability': context.get('rm_availability', {}),
+            'campaign_active': context.get('active_campaigns', []),
+            'regulatory_constraints': context.get('regulatory_constraints', [])
+        }
+        
+        return factors
+        
+    def _apply_business_rules(self, customer_data: Dict, predictions: Dict) -> Dict:
+        """
+        Apply business rules and constraints
+        """
+        constraints = {
+            'max_contacts_per_month': 3,
+            'min_days_between_contacts': 7,
+            'budget_available': True,
+            'compliance_cleared': True
+        }
+        
+        # Check contact frequency
+        last_contact = customer_data.get('last_contact_date')
+        if last_contact:
+            days_since_contact = (datetime.now() - last_contact).days
+            constraints['can_contact'] = days_since_contact >= constraints['min_days_between_contacts']
+        else:
+            constraints['can_contact'] = True
+            
+        # Check segment-specific rules
+        if customer_data.get('segment') == 'VIP':
+            constraints['requires_senior_rm'] = True
+            constraints['priority_override'] = Priority.HIGH
+            
+        return constraints
+        
+    def _generate_optimal_decision(self, customer_data: Dict, predictions: Dict, 
+                                 context: Dict, constraints: Dict) -> Decision:
+        """
+        Generate optimal decision based on all inputs
+        """
+        # Decision matrix based on predictions
+        decisions = []
+        
+        # High churn risk decision
+        if predictions.get('churn_risk', 0) > 0.7:
+            decisions.append({
+                'action': ActionType.RETENTION_CALL,
+                'priority': Priority.CRITICAL,
+                'confidence': predictions['churn_risk'],
+                'impact': customer_data.get('lifetime_value', 0) * 0.3,
+                'reasoning': f"High churn risk ({predictions['churn_risk']:.1%})"
+            })
+            
+        # Cross-sell opportunity
+        if predictions.get('next_best_product') and customer_data.get('product_count', 1) < 3:
+            decisions.append({
+                'action': ActionType.CROSS_SELL,
+                'priority': Priority.HIGH,
+                'confidence': predictions.get('product_confidence', 0.8),
+                'impact': customer_data.get('avg_product_value', 10000) * 0.5,
+                'reasoning': f"Strong fit for {predictions['next_best_product']}"
+            })
+            
+        # Anomaly detected
+        if predictions.get('anomaly_score', 0) < -0.5:
+            decisions.append({
+                'action': ActionType.RISK_ALERT,
+                'priority': Priority.HIGH,
+                'confidence': abs(predictions['anomaly_score']),
+                'impact': 0,  # Risk mitigation
+                'reasoning': "Unusual trading pattern detected"
+            })
+            
+        # Select best decision
+        if decisions:
+            # Sort by expected impact and priority
+            best_decision = max(decisions, key=lambda x: (x['impact'], -x['priority'].value))
+            
+            return Decision(
+                customer_id=customer_data['id'],
+                action_type=best_decision['action'],
+                priority=best_decision['priority'],
+                confidence=best_decision['confidence'],
+                expected_impact=best_decision['impact'],
+                reasoning=best_decision['reasoning'],
+                recommended_time=self._calculate_optimal_time(context),
+                expiry_time=datetime.now() + timedelta(days=7),
+                metadata={
+                    'predictions': predictions,
+                    'constraints': constraints
+                }
+            )
+        else:
+            return Decision(
+                customer_id=customer_data['id'],
+                action_type=ActionType.NO_ACTION,
+                priority=Priority.LOW,
+                confidence=1.0,
+                expected_impact=0,
+                reasoning="No immediate action required",
+                recommended_time=datetime.now(),
+                expiry_time=datetime.now() + timedelta(days=30),
+                metadata={}
+            )
+            
+    def _calculate_optimal_time(self, context: Dict) -> datetime:
+        """
+        Calculate optimal time for action
+        """
+        current_hour = datetime.now().hour
+        
+        # Business hours optimization
+        if current_hour < 9:
+            return datetime.now().replace(hour=9, minute=0)
+        elif current_hour >= 17:
+            return (datetime.now() + timedelta(days=1)).replace(hour=9, minute=0)
+        else:
+            return datetime.now() + timedelta(minutes=30)
+            
+    async def _predict_churn(self, customer_data: Dict) -> float:
+        """Async churn prediction"""
+        # Simulate async model call
+        await asyncio.sleep(0.01)
+        return np.random.random()  # Replace with actual model
+        
+    async def _predict_clv(self, customer_data: Dict) -> float:
+        """Async CLV prediction"""
+        await asyncio.sleep(0.01)
+        return np.random.uniform(10000, 1000000)
+        
+    async def _detect_anomaly(self, customer_data: Dict) -> float:
+        """Async anomaly detection"""
+        await asyncio.sleep(0.01)
+        return np.random.uniform(-1, 1)
+        
+    async def _calculate_influence(self, customer_data: Dict) -> float:
+        """Async influence calculation"""
+        await asyncio.sleep(0.01)
+        return np.random.random()
+        
+    async def _recommend_product(self, customer_data: Dict) -> str:
+        """Async product recommendation"""
+        await asyncio.sleep(0.01)
+        products = ['Bonds', 'ETFs', 'Derivatives', 'Unit Trusts']
+        return np.random.choice(products)
+
+# ============================================================================
+# REAL-TIME ORCHESTRATION SYSTEM
+# ============================================================================
+
+class OrchestrationSystem:
+    """
+    Orchestrates real-time decision making and task distribution
+    """
     
-    diff_in_diff = change_2025 - change_2024
+    def __init__(self, decision_engine: DecisionEngine):
+        self.decision_engine = decision_engine
+        self.task_queue = asyncio.Queue()
+        self.rm_assignments = {}
+        self.active_tasks = {}
+        
+    async def process_customer_event(self, event: Dict):
+        """
+        Process incoming customer event
+        """
+        event_type = event.get('type')
+        customer_data = event.get('customer_data')
+        
+        logger.info(f"Processing event: {event_type} for customer {customer_data.get('id')}")
+        
+        # Get current context
+        context = await self._get_current_context()
+        
+        # Make decision
+        decision = await self.decision_engine.make_decision(customer_data, context)
+        
+        # Create and assign task if action needed
+        if decision.action_type != ActionType.NO_ACTION:
+            task = await self._create_task(customer_data, decision)
+            await self._assign_task(task)
+            
+    async def _get_current_context(self) -> Dict:
+        """
+        Get current business context
+        """
+        context = {
+            'market_volatility': await self._get_market_volatility(),
+            'rm_availability': await self._get_rm_availability(),
+            'active_campaigns': await self._get_active_campaigns(),
+            'system_load': await self._get_system_load()
+        }
+        return context
+        
+    async def _create_task(self, customer_data: Dict, decision: Decision) -> RMTask:
+        """
+        Create task from decision
+        """
+        customer = Customer(
+            id=customer_data['id'],
+            name=customer_data['name'],
+            industry=customer_data.get('industry', 'Unknown'),
+            segment=customer_data.get('segment', 'Regular'),
+            lifetime_value=customer_data.get('lifetime_value', 0),
+            churn_risk=customer_data.get('churn_risk', 0),
+            last_interaction=customer_data.get('last_interaction', datetime.now()),
+            assigned_rm=customer_data.get('assigned_rm', 'unassigned')
+        )
+        
+        task = RMTask(
+            task_id=f"TASK_{datetime.now().timestamp()}",
+            rm_id=customer.assigned_rm,
+            customer=customer,
+            decision=decision,
+            status='pending',
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
+        
+        return task
+        
+    async def _assign_task(self, task: RMTask):
+        """
+        Assign task to appropriate RM
+        """
+        # Find best available RM
+        best_rm = await self._find_best_rm(task)
+        
+        if best_rm:
+            task.rm_id = best_rm
+            task.status = 'assigned'
+            task.updated_at = datetime.now()
+            
+            # Add to task queue
+            await self.task_queue.put(task)
+            
+            # Notify RM
+            await self._notify_rm(best_rm, task)
+            
+            logger.info(f"Task {task.task_id} assigned to RM {best_rm}")
+        else:
+            logger.warning(f"No available RM for task {task.task_id}")
+            
+    async def _find_best_rm(self, task: RMTask) -> Optional[str]:
+        """
+        Find best available RM for task
+        """
+        # Get RM availability and skills
+        rm_pool = await self._get_available_rms()
+        
+        # Score RMs based on:
+        # - Current workload
+        # - Customer history
+        # - Skill match
+        # - Performance history
+        
+        best_rm = None
+        best_score = -1
+        
+        for rm in rm_pool:
+            score = await self._score_rm_for_task(rm, task)
+            if score > best_score:
+                best_score = score
+                best_rm = rm['id']
+                
+        return best_rm
+        
+    async def _score_rm_for_task(self, rm: Dict, task: RMTask) -> float:
+        """
+        Score RM suitability for task
+        """
+        score = 0.0
+        
+        # Workload factor (fewer tasks = higher score)
+        current_tasks = rm.get('current_tasks', 0)
+        score += (10 - current_tasks) / 10 * 0.3
+        
+        # Customer history (previous interactions = higher score)
+        if task.customer.id in rm.get('customer_history', []):
+            score += 0.3
+            
+        # Skill match
+        if task.decision.action_type == ActionType.CROSS_SELL:
+            if 'sales' in rm.get('skills', []):
+                score += 0.2
+                
+        # Performance history
+        success_rate = rm.get('success_rate', 0.5)
+        score += success_rate * 0.2
+        
+        return score
+        
+    async def _notify_rm(self, rm_id: str, task: RMTask):
+        """
+        Notify RM of new task
+        """
+        notification = {
+            'rm_id': rm_id,
+            'task_id': task.task_id,
+            'customer_name': task.customer.name,
+            'action': task.decision.action_type.value,
+            'priority': task.decision.priority.value,
+            'expected_impact': task.decision.expected_impact,
+            'reasoning': task.decision.reasoning,
+            'recommended_time': task.decision.recommended_time.isoformat()
+        }
+        
+        # Send via WebSocket/Push notification
+        await self._send_notification(rm_id, notification)
+        
+    async def _get_market_volatility(self) -> str:
+        """Get current market volatility"""
+        # Implement actual market data integration
+        return 'normal'
+        
+    async def _get_rm_availability(self) -> Dict:
+        """Get RM availability status"""
+        # Implement actual availability check
+        return {}
+        
+    async def _get_active_campaigns(self) -> List:
+        """Get active campaigns"""
+        # Implement campaign management integration
+        return []
+        
+    async def _get_system_load(self) -> float:
+        """Get current system load"""
+        # Implement system monitoring
+        return 0.5
+        
+    async def _get_available_rms(self) -> List[Dict]:
+        """Get available RMs with their stats"""
+        # Implement RM management system integration
+        return [
+            {
+                'id': 'RM001',
+                'current_tasks': 5,
+                'customer_history': [],
+                'skills': ['sales', 'retention'],
+                'success_rate': 0.75
+            }
+        ]
+        
+    async def _send_notification(self, rm_id: str, notification: Dict):
+        """Send notification to RM"""
+        # Implement actual notification system
+        logger.info(f"Notification sent to {rm_id}: {notification}")
+
+# ============================================================================
+# REAL-TIME MONITORING DASHBOARD
+# ============================================================================
+
+class RealTimeDashboard:
+    """
+    Real-time monitoring dashboard using Dash
+    """
     
-    comparison_table.append({
-        'Security_Type': sec_type,
-        '2024_Change_%': round(change_2024, 2),
-        '2025_Change_%': round(change_2025, 2),
-        'Diff_in_Diff': round(diff_in_diff, 2),
-        'True_Impact': 'Yes' if abs(diff_in_diff) > 5 else 'No'
-    })
+    def __init__(self, orchestration_system: OrchestrationSystem):
+        self.orchestration = orchestration_system
+        self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+        self.setup_layout()
+        self.setup_callbacks()
+        
+    def setup_layout(self):
+        """
+        Setup dashboard layout
+        """
+        self.app.layout = dbc.Container([
+            dbc.Row([
+                dbc.Col([
+                    html.H1("Banking Intelligence Command Center", className="text-center mb-4"),
+                    html.Hr()
+                ])
+            ]),
+            
+            # Key Metrics Row
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H4("Active Decisions", className="card-title"),
+                            html.H2(id="active-decisions", children="0"),
+                            html.P("↑ 12% from yesterday", className="text-success")
+                        ])
+                    ])
+                ], width=3),
+                
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H4("Success Rate", className="card-title"),
+                            html.H2(id="success-rate", children="0%"),
+                            html.P("Target: 75%", className="text-muted")
+                        ])
+                    ])
+                ], width=3),
+                
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H4("Total Impact", className="card-title"),
+                            html.H2(id="total-impact", children="$0"),
+                            html.P("This month", className="text-muted")
+                        ])
+                    ])
+                ], width=3),
+                
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H4("System Health", className="card-title"),
+                            html.H2(id="system-health", children="Good", className="text-success"),
+                            html.P("All systems operational", className="text-muted")
+                        ])
+                    ])
+                ], width=3)
+            ], className="mb-4"),
+            
+            # Charts Row
+            dbc.Row([
+                dbc.Col([
+                    dcc.Graph(id="decision-timeline"),
+                    dcc.Interval(id="timeline-update", interval=5000)  # Update every 5 seconds
+                ], width=6),
+                
+                dbc.Col([
+                    dcc.Graph(id="action-distribution"),
+                    dcc.Interval(id="distribution-update", interval=10000)
+                ], width=6)
+            ], className="mb-4"),
+            
+            # Task Queue
+            dbc.Row([
+                dbc.Col([
+                    html.H3("Real-time Task Queue"),
+                    html.Div(id="task-queue-table"),
+                    dcc.Interval(id="queue-update", interval=2000)  # Update every 2 seconds
+                ])
+            ], className="mb-4"),
+            
+            # Alerts Section
+            dbc.Row([
+                dbc.Col([
+                    html.H3("System Alerts"),
+                    html.Div(id="alerts-container"),
+                    dcc.Interval(id="alerts-update", interval=3000)
+                ])
+            ])
+        ], fluid=True)
+        
+    def setup_callbacks(self):
+        """
+        Setup dashboard callbacks
+        """
+        @self.app.callback(
+            [Output("active-decisions", "children"),
+             Output("success-rate", "children"),
+             Output("total-impact", "children")],
+            [Input("timeline-update", "n_intervals")]
+        )
+        def update_metrics(n):
+            # Get current metrics
+            metrics = self.orchestration.decision_engine.performance_metrics
+            
+            active = len([t for t in self.orchestration.active_tasks.values() 
+                         if t['status'] in ['pending', 'in_progress']])
+            
+            success_rate = (metrics['successful_outcomes'] / 
+                          max(metrics['decisions_made'], 1) * 100)
+            
+            return (
+                str(active),
+                f"{success_rate:.1f}%",
+                f"${metrics['total_impact']:,.0f}"
+            )
+            
+        @self.app.callback(
+            Output("decision-timeline", "figure"),
+            [Input("timeline-update", "n_intervals")]
+        )
+        def update_timeline(n):
+            # Get recent decisions
+            recent_decisions = self.orchestration.decision_engine.decision_history[-50:]
+            
+            if recent_decisions:
+                df = pd.DataFrame([
+                    {
+                        'timestamp': d['timestamp'],
+                        'action': d['decision'].action_type.value,
+                        'impact': d['decision'].expected_impact
+                    }
+                    for d in recent_decisions
+                ])
+                
+                fig = go.Figure()
+                
+                # Add scatter plot
+                fig.add_trace(go.Scatter(
+                    x=df['timestamp'],
+                    y=df['impact'],
+                    mode='markers',
+                    marker=dict(
+                        size=10,
+                        color=df['impact'],
+                        colorscale='Viridis',
+                        showscale=True
+                    ),
+                    text=df['action'],
+                    hovertemplate='%{text}<br>Impact: $%{y:,.0f}<br>Time: %{x}'
+                ))
+                
+                fig.update_layout(
+                    title="Decision Timeline",
+                    xaxis_title="Time",
+                    yaxis_title="Expected Impact ($)",
+                    hovermode='closest'
+                )
+                
+                return fig
+            else:
+                return go.Figure()
+                
+        @self.app.callback(
+            Output("action-distribution", "figure"),
+            [Input("distribution-update", "n_intervals")]
+        )
+        def update_distribution(n):
+            # Count actions by type
+            action_counts = {}
+            for decision in self.orchestration.decision_engine.decision_history:
+                action = decision['decision'].action_type.value
+                action_counts[action] = action_counts.get(action, 0) + 1
+                
+            if action_counts:
+                fig = go.Figure(data=[
+                    go.Pie(
+                        labels=list(action_counts.keys()),
+                        values=list(action_counts.values()),
+                        hole=0.3
+                    )
+                ])
+                
+                fig.update_layout(
+                    title="Action Distribution",
+                    showlegend=True
+                )
+                
+                return fig
+            else:
+                return go.Figure()
+                
+        @self.app.callback(
+            Output("task-queue-table", "children"),
+            [Input("queue-update", "n_intervals")]
+        )
+        def update_task_queue(n):
+            # Get current tasks
+            tasks = list(self.orchestration.active_tasks.values())[:10]  # Show top 10
+            
+            if tasks:
+                table_header = [
+                    html.Thead([
+                        html.Tr([
+                            html.Th("Customer"),
+                            html.Th("Action"),
+                            html.Th("Priority"),
+                            html.Th("RM"),
+                            html.Th("Status"),
+                            html.Th("Impact")
+                        ])
+                    ])
+                ]
+                
+                table_body = [
+                    html.Tbody([
+                        html.Tr([
+                            html.Td(task['customer_name']),
+                            html.Td(task['action']),
+                            html.Td(task['priority']),
+                            html.Td(task['rm_id']),
+                            html.Td(task['status']),
+                            html.Td(f"${task['expected_impact']:,.0f}")
+                        ]) for task in tasks
+                    ])
+                ]
+                
+                return dbc.Table(
+                    table_header + table_body,
+                    bordered=True,
+                    hover=True,
+                    responsive=True,
+                    striped=True
+                )
+            else:
+                return html.P("No active tasks", className="text-muted")
 
-comparison_df = pd.DataFrame(comparison_table).sort_values('Diff_in_Diff', ascending=False)
-print("\n", comparison_df.to_string(index=False))
+# ============================================================================
+# API ENDPOINTS
+# ============================================================================
 
-# Visualization of seasonality
-fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-fig.suptitle(f'Seasonality Check: 2024 vs 2025 (April 2nd Period)', fontsize=16)
+app = FastAPI(title="Banking Intelligence API")
 
-# Plot 1: Daily volumes comparison
-ax1 = axes[0, 0]
-dates_2024 = pd.date_range(start=event_2024-timedelta(days=window_days), 
-                          end=event_2024+timedelta(days=window_days), freq='B')
-dates_2025 = pd.date_range(start=event_2025-timedelta(days=window_days), 
-                          end=event_2025+timedelta(days=window_days), freq='B')
+class EventRequest(BaseModel):
+    type: str
+    customer_data: Dict[str, Any]
+    metadata: Optional[Dict[str, Any]] = None
 
-data_2024 = df[df['Date'].isin(dates_2024)].groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
-data_2025 = df[df['Date'].isin(dates_2025)].groupby('Date')['Net_Amount'].apply(lambda x: x.abs().sum())
+class DecisionResponse(BaseModel):
+    decision_id: str
+    customer_id: str
+    action: str
+    priority: int
+    confidence: float
+    expected_impact: float
+    reasoning: str
 
-# Align to same day numbers
-days_from_event = range(-window_days, window_days+1)
-ax1.plot(days_from_event[:len(data_2024)], data_2024.values/1e6, label='2024', alpha=0.7, linewidth=2)
-ax1.plot(days_from_event[:len(data_2025)], data_2025.values/1e6, label='2025', alpha=0.7, linewidth=2)
-ax1.axvline(x=0, color='red', linestyle='--', alpha=0.5)
-ax1.set_xlabel('Days from Event Date')
-ax1.set_ylabel('Trading Volume (Million $)')
-ax1.set_title('Daily Trading Volume Comparison')
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+# Initialize systems
+models = {}  # Load your trained models here
+config = {}  # Load configuration
+decision_engine = DecisionEngine(models, config)
+orchestration = OrchestrationSystem(decision_engine)
 
-# Plot 2: Cumulative volume change
-ax2 = axes[0, 1]
-cumsum_2024 = (data_2024.values - data_2024.values[0]).cumsum()
-cumsum_2025 = (data_2025.values - data_2025.values[0]).cumsum()
-ax2.plot(days_from_event[:len(cumsum_2024)], cumsum_2024/1e6, label='2024', linewidth=2)
-ax2.plot(days_from_event[:len(cumsum_2025)], cumsum_2025/1e6, label='2025', linewidth=2)
-ax2.axvline(x=0, color='red', linestyle='--', alpha=0.5)
-ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-ax2.set_xlabel('Days from Event Date')
-ax2.set_ylabel('Cumulative Change (Million $)')
-ax2.set_title('Cumulative Volume Change from Start')
-ax2.legend()
-ax2.grid(True, alpha=0.3)
-
-# Plot 3: Security type changes
-ax3 = axes[1, 0]
-top_securities = comparison_df.nlargest(5, 'Diff_in_Diff')['Security_Type']
-x = np.arange(len(top_securities))
-width = 0.35
-
-changes_2024 = [comparison_df[comparison_df['Security_Type']==s]['2024_Change_%'].values[0] for s in top_securities]
-changes_2025 = [comparison_df[comparison_df['Security_Type']==s]['2025_Change_%'].values[0] for s in top_securities]
-
-ax3.bar(x - width/2, changes_2024, width, label='2024', alpha=0.8)
-ax3.bar(x + width/2, changes_2025, width, label='2025', alpha=0.8)
-ax3.set_xlabel('Security Type')
-ax3.set_ylabel('Distribution Change (%)')
-ax3.set_title('Top 5 Security Type Changes')
-ax3.set_xticks(x)
-ax3.set_xticklabels(top_securities, rotation=45, ha='right')
-ax3.legend()
-ax3.grid(True, alpha=0.3)
-
-# Plot 4: Difference-in-Differences
-ax4 = axes[1, 1]
-diff_in_diff_values = comparison_df.sort_values('Diff_in_Diff', ascending=True)
-colors = ['red' if x < 0 else 'green' for x in diff_in_diff_values['Diff_in_Diff']]
-ax4.barh(range(len(diff_in_diff_values)), diff_in_diff_values['Diff_in_Diff'], color=colors, alpha=0.7)
-ax4.set_yticks(range(len(diff_in_diff_values)))
-ax4.set_yticklabels(diff_in_diff_values['Security_Type'])
-ax4.set_xlabel('Difference-in-Differences (%)')
-ax4.set_title('True Event Impact (2025 change - 2024 change)')
-ax4.axvline(x=0, color='black', linestyle='-', alpha=0.3)
-ax4.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('april_seasonality_check.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# Statistical test for seasonality
-daily_changes_2024 = data_2024.pct_change().dropna()
-daily_changes_2025 = data_2025.pct_change().dropna()
-
-# Mann-Whitney U test
-u_stat, p_value = stats.mannwhitneyu(daily_changes_2024, daily_changes_2025, alternative='two-sided')
-
-print(f"\n" + "="*60)
-print("SEASONALITY TEST RESULTS")
-print("="*60)
-print(f"Mann-Whitney U test comparing 2024 vs 2025 patterns:")
-print(f"  U-statistic: {u_stat:.3f}")
-print(f"  P-value: {p_value:.4f}")
-print(f"  Interpretation: {'Patterns are DIFFERENT (Event impact confirmed)' if p_value < 0.05 else 'Patterns are SIMILAR (Might be seasonal)'}")
-
-# Summary
-true_impacts = comparison_df[comparison_df['True_Impact'] == 'Yes'].sort_values('Diff_in_Diff', ascending=False)
-print(f"\nSecurity types with TRUE event impact (after controlling for seasonality):")
-for _, row in true_impacts.iterrows():
-    print(f"  {row['Security_Type']}: {row['Diff_in_Diff']:.1f}% change beyond seasonal pattern")
-
-# 8. Executive Summary
-print("\n" + "=" * 60)
-print("EXECUTIVE SUMMARY")
-print("=" * 60)
-
-# Calculate key metrics
-total_customers = df['Customer_Name'].nunique()
-pre_data = df[df['Date'] < event_date]
-post_data = df[df['Date'] >= event_date]
-
-pre_volume = pre_data['Net_Amount'].abs().sum()
-post_volume = post_data['Net_Amount'].abs().sum()
-volume_change = ((post_volume - pre_volume) / pre_volume * 100)
-
-pre_net = pre_data['Net_Amount'].sum()
-post_net = post_data['Net_Amount'].sum()
-net_change = post_net - pre_net
-
-foreign_pre = pre_data[pre_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].abs().sum()
-foreign_post = post_data[post_data['Security_Type'] == 'Foreign Stocks']['Net_Amount'].abs().sum()
-foreign_change = ((foreign_post - foreign_pre) / foreign_pre * 100) if foreign_pre > 0 else 0
-
-summary_stats = {
-    'Total Customers Analyzed': total_customers,
-    'Pre-Event Trading Volume': f"${pre_volume/1e6:.1f}M",
-    'Post-Event Trading Volume': f"${post_volume/1e6:.1f}M",
-    'Volume Change': f"{volume_change:.1f}%",
-    'Net Position Change': f"${net_change/1e6:.1f}M",
-    'Foreign Stocks Volume Change': f"{foreign_change:.1f}%",
-    'Statistical Significance (Volume)': 'Yes' if stat_results['Volume_Change']['p_value'] < 0.05 else 'No',
-    'Statistical Significance (Distribution)': 'Yes' if stat_results['Security_Distribution']['p_value'] < 0.05 else 'No',
-    'Seasonality Controlled': 'Yes' if p_value < 0.05 else 'No'
-}
-
-for key, value in summary_stats.items():
-    print(f"{key}: {value}")
-
-print("\n" + "=" * 60)
-print("FILES GENERATED:")
-print("- april_event_study.png")
-print("- april_portfolio_shift.html") 
-print("- april_customer_clusters.png")
-print("- april_industry_heatmap.png")
-print("- april_time_series_analysis.png")
-print("- april_seasonality_check.png")
-print("=" * 60))
-    
-    # Plot 2: Cumulative Abnormal Trading
-    ax2 = axes[0, 1]
-    ax2.plot(event_metrics['Days_from_event'], event_metrics['CAR']/1e6, 
-             marker='o', markersize=4, color='green')
-    ax2.axvline(x=0, color='red', linestyle='--', label='Event Date')
-    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-    ax2.set_xlabel('Days from Event')
-    ax2.set_ylabel('Cumulative Abnormal Trading (Million $)')
-    ax2.set_title('Cumulative Abnormal Trading')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # Plot 3: Trade Count
-    ax3 = axes[1, 0]
-    ax3.bar(event_metrics['Days_from_event'], event_metrics['Trade_Count'], 
-            color='skyblue', alpha=0.7)
-    ax3.axvline(x=0, color='red', linestyle='--', label='Event Date')
-    ax3.set_xlabel('Days from Event')
-    ax3.set_ylabel('Number of Trades')
-    ax3.set_title('Daily Trade Count')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    
-    # Plot 4: Average Net Amount per Trade
-    ax4 = axes[1, 1]
-    colors = ['green' if x > 0 else 'red' for x in event_metrics['Avg_Net_Amount']]
-    ax4.bar(event_metrics['Days_from_event'], event_metrics['Avg_Net_Amount']/1000, 
-            color=colors, alpha=0.7)
-    ax4.axvline(x=0, color='red', linestyle='--', label='Event Date')
-    ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-    ax4.set_xlabel('Days from Event')
-    ax4.set_ylabel('Avg Net Amount per Trade (Thousand $)')
-    ax4.set_title('Average Net Amount per Trade')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    return fig
-
-def create_portfolio_shift_visualization(shift_df):
-    """Create portfolio composition shift visualization"""
-    fig = make_subplots(rows=1, cols=2, 
-                        subplot_titles=('Portfolio Composition Change', 'Absolute % Change'),
-                        specs=[[{'type': 'bar'}, {'type': 'bar'}]])
-    
-    # Grouped bar chart
-    fig.add_trace(
-        go.Bar(name='Pre-Period', 
-               x=shift_df.index, 
-               y=shift_df['Pre_Period_%'],
-               marker_color='lightblue'),
-        row=1, col=1
+@app.post("/api/v1/process_event", response_model=DecisionResponse)
+async def process_event(event: EventRequest, background_tasks: BackgroundTasks):
+    """
+    Process customer event and return decision
+    """
+    # Process in background
+    background_tasks.add_task(
+        orchestration.process_customer_event,
+        event.dict()
     )
     
-    fig.add_trace(
-        go.Bar(name='Post-Period', 
-               x=shift_df.index, 
-               y=shift_df['Post_Period_%'],
-               marker_color='darkblue'),
-        row=1, col=1
+    # Return immediate response
+    return DecisionResponse(
+        decision_id=f"DEC_{datetime.now().timestamp()}",
+        customer_id=event.customer_data.get('id', 'unknown'),
+        action="processing",
+        priority=3,
+        confidence=1.0,
+        expected_impact=0,
+        reasoning="Event queued for processing"
     )
+
+@app.websocket("/ws/rm/{rm_id}")
+async def websocket_endpoint(websocket: WebSocket, rm_id: str):
+    """
+    WebSocket endpoint for real-time RM notifications
+    """
+    await websocket.accept()
     
-    # Change bar chart
-    colors = ['red' if x < 0 else 'green' for x in shift_df['Change_%']]
-    fig.add_trace(
-        go.Bar(x=shift_df.index, 
-               y=shift_df['Change_%'],
-               marker_color=colors,
-               showlegend=False),
-        row=1, col=2
-    )
+    try:
+        while True:
+            # Send task updates
+            if orchestration.task_queue.qsize() > 0:
+                task = await orchestration.task_queue.get()
+                if task.rm_id == rm_id:
+                    await websocket.send_json({
+                        'type': 'new_task',
+                        'task': asdict(task)
+                    })
+                    
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        await websocket.close()
+
+@app.get("/api/v1/metrics")
+async def get_metrics():
+    """
+    Get system metrics for monitoring
+    """
+    return {
+        'performance': decision_engine.performance_metrics,
+        'queue_size': orchestration.task_queue.qsize(),
+        'active_tasks': len(orchestration.active_tasks),
+        'decision_count': len(decision_engine.decision_history),
+        'timestamp': datetime.now().isoformat()
+    }
+
+@app.get("/api/v1/health")
+async def health_check():
+    """
+    Health check endpoint
+    """
+    return {
+        'status': 'healthy',
+        'version': '1.0.0',
+        'timestamp': datetime.now().isoformat()
+    }
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+async def start_systems():
+    """
+    Start all systems
+    """
+    logger.info("Starting Intelligent Decision System...")
     
-    fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
-    fig.update_yaxes(title_text="Change (% points)", row=1, col=2)
-    fig.update_xaxes(title_text="Security Type", row=1, col=1)
-    fig.update_xaxes(title_text="Security Type", row=1, col=2)
+    # Initialize components
+    dashboard = RealTimeDashboard(orchestration)
     
-    fig.update_layout(height=500, title_text="Portfolio Composition Shift Analysis")
-    return fig
-
-def create_customer_clustering_plot(customer_df):
-    """Create customer clustering visualization"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # Start background tasks
+    asyncio.create_task(monitor_system_health())
+    asyncio.create_task(process_event_stream())
     
-    # Scatter plot of clusters
-    colors = ['blue', 'red', 'green', 'orange']
-    for i, cluster in enumerate(customer_df['Cluster_Name'].unique()):
-        cluster_data = customer_df[customer_df['Cluster_Name'] == cluster]
-        ax1.scatter(cluster_data['Foreign_Change_%'], 
-                   cluster_data['Volume_Change_%'],
-                   label=cluster, color=colors[i % len(colors)], alpha=0.6)
+    logger.info("All systems initialized successfully")
+
+async def monitor_system_health():
+    """
+    Monitor system health continuously
+    """
+    while True:
+        # Check system components
+        health_status = {
+            'api': 'healthy',
+            'decision_engine': 'healthy',
+            'orchestration': 'healthy',
+            'models': 'healthy'
+        }
+        
+        # Log status
+        logger.info(f"System health: {health_status}")
+        
+        await asyncio.sleep(60)  # Check every minute
+
+async def process_event_stream():
+    """
+    Process incoming event stream
+    """
+    # In production, connect to Kafka/event stream
+    while True:
+        # Simulate event stream
+        await asyncio.sleep(5)
+        
+        # Generate sample event
+        event = {
+            'type': 'transaction',
+            'customer_data': {
+                'id': f'CUST_{np.random.randint(1000, 9999)}',
+                'name': f'Customer {np.random.randint(1, 100)}',
+                'lifetime_value': np.random.uniform(10000, 1000000),
+                'churn_risk': np.random.random()
+            }
+        }
+        
+        await orchestration.process_customer_event(event)
+
+if __name__ == "__main__":
+    # Run the complete system
+    print("="*80)
+    print("INTELLIGENT REAL-TIME DECISION SYSTEM")
+    print("="*80)
+    print("\nStarting all components...")
     
-    ax1.set_xlabel('Foreign Stock % Change')
-    ax1.set_ylabel('Trading Volume % Change')
-    ax1.set_title('Customer Behavioral Clusters')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-    ax1.axvline(x=0, color='black', linestyle='-', alpha=0.3)
+    # Start async systems
+    asyncio.run(start_systems())
     
-    # Cluster distribution
-    cluster_counts = customer_df['Cluster_Name'].value_counts()
-    ax2.pie(cluster_counts.values, labels=cluster_counts.index, autopct='%1.1f%%',
-            colors=colors[:len(cluster_counts)])
-    ax2.set_title('Distribution of Customer Segments')
+    # Start API server (in production, use separate process)
+    # uvicorn.run(app, host="0.0.0.0", port=8000)
     
-    plt.tight_layout()
-    return fig
+    print("\nSystem ready!")
+    print("\nAccess points:")
+    print("  - API: http://localhost:8000")
+    print("  - Dashboard: http://localhost:8050")
+    print("  - WebSocket: ws://localhost:8000/ws/rm/{rm_id}")
+    print("  - Metrics: http://localhost:8000/api/v1/metrics")
 
-def create_industry_heatmap(df, event_date, top_n=8):
-    """Create industry impact heatmap"""
-    event_date = pd.Timestamp(event_date)
-    
-    pre_data = df[df['Date'] < event_date]
-    post_data = df[df['Date'] >= event_date]
-    
-    # Get top industries by total trading volume (absolute)
-    industry_volume = df.groupby('Customer_Industry')['Net_Amount'].apply(lambda x: x.abs().sum()).sort_values(ascending=False)
-    top_industries = industry_volume.head(top_n).index.tolist()
-    
-    # Filter data for top industries
-    pre_filtered = pre_data[pre_data['Customer_Industry'].isin(top_industries)]
-    post_filtered = post_data[post_data['Customer_Industry'].isin(top_industries)]
-    
-    # Create pivot tables using absolute values for volume comparison
-    pre_pivot = pre_filtered.pivot_table(values='Net_Amount', 
-                                         index='Customer_Industry', 
-                                         columns='Security_Type', 
-                                         aggfunc=lambda x: x.abs().sum(), fill_value=0)
-    
-    post_pivot = post_filtered.pivot_table(values='Net_Amount', 
-                                          index='Customer_Industry', 
-                                          columns='Security_Type', 
-                                          aggfunc=lambda x: x.abs().sum(), fill_value=0)
-    
-    # Ensure same shape
-    all_industries = sorted(list(set(pre_pivot.index) | set(post_pivot.index)))
-    all_securities = sorted(list(set(pre_pivot.columns) | set(post_pivot.columns)))
-    
-    pre_pivot = pre_pivot.reindex(index=all_industries, columns=all_securities, fill_value=0)
-    post_pivot = post_pivot.reindex(index=all_industries, columns=all_securities, fill_value=0)
-    
-    # Calculate percentage change
-    change_pivot = ((post_pivot - pre_pivot) / pre_pivot * 100).replace([np.inf, -np.inf], 0).fillna(0).round(1)
-    
-    # Create heatmap
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(change_pivot, annot=True, fmt='.1f', cmap='RdYlGn', center=0,
-                cbar_kws={'label': '% Change'}, vmin=-100, vmax=100)
-    plt.title(f'Top {top_n} Industries & Security Types - Trading Volume Change (%)')
-    plt.xlabel('Security Type')
-    plt.ylabel('Industry')
-    plt.tight_layout()
-    return plt.gcf()
 
-# ==================== MAIN ANALYSIS ====================
 
-# Focus only on April 2nd event
-event_date = apr_event
-event_name = "Liberation Day Event (Apr 2, 2025)"
 
-# Update periods
-df['Event_Period'] = 'Pre-Event'
-df.loc[df['Date'] >= event_date, 'Event_Period'] = 'Post-Event'
 
-print("=" * 60)
-print(f"BANKING TRADE ANALYSIS - {event_name}")
-print("=" * 60)
 
-# 1. Event Study Analysis
-print("\n1. EVENT STUDY ANALYSIS")
-print("-" * 40)
+===============
 
-event_study_result = perform_event_study(df, event_date, window_pre=30, window_post=40)
-event_fig = create_event_study_plot(event_study_result, event_name)
-plt.savefig('april_event_study.png', dpi=300, bbox_inches='tight')
-plt.close()
 
-print(f"Trading volume change: {event_study_result['Abnormal_Amount'].sum()/1e6:.2f}M")
-print(f"Maximum daily impact: {event_study_result['Abnormal_Amount'].max()/1e6:.2f}M")
+Hi Junghyu,
 
-# 2. Portfolio Shift Analysis
-print("\n2. PORTFOLIO COMPOSITION SHIFT")
-print("-" * 40)
+I'm Evan (Yeonghun), a Data Analytics Intern in Commercial Banking.
 
-portfolio_shift = portfolio_shift_analysis(df, event_date)
-print("\nSecurity Type Distribution Changes:")
-print(portfolio_shift)
+I know you’re busy with the Olympic project — but once things settle down (maybe starting next Monday or Tuesday), I’d love to ask for a quick 15-minute chat if you're open to it.
 
-shift_fig = create_portfolio_shift_visualization(portfolio_shift)
-shift_fig.write_html('april_portfolio_shift.html')
+I’m really interested in DevOps and how public cloud services work in a banking environment, and would appreciate learning from your experience.
 
-# 3. Statistical Significance Tests
-print("\n3. STATISTICAL SIGNIFICANCE TESTS")
-print("-" * 40)
+Totally flexible on timing — happy to work around your schedule.
 
-stat_results = statistical_significance_tests(df, event_date)
-
-print("\nVolume Change Test:")
-print(f"  Pre-period mean: ${stat_results['Volume_Change']['pre_mean']/1e6:.2f}M")
-print(f"  Post-period mean: ${stat_results['Volume_Change']['post_mean']/1e6:.2f}M")
-print(f"  Change: {stat_results['Volume_Change']['percent_change']:.1f}%")
-print(f"  T-statistic: {stat_results['Volume_Change']['t_statistic']:.3f}")
-print(f"  P-value: {stat_results['Volume_Change']['p_value']:.4f}")
-
-print("\nNet Position Change Test:")
-print(f"  Pre-period mean: ${stat_results['Net_Position_Change']['pre_mean']/1e6:.2f}M")
-print(f"  Post-period mean: ${stat_results['Net_Position_Change']['post_mean']/1e6:.2f}M")
-print(f"  T-statistic: {stat_results['Net_Position_Change']['t_statistic']:.3f}")
-print(f"  P-value: {stat_results['Net_Position_Change']['p_value']:.4f}")
-
-print("\nSecurity Distribution Test:")
-print(f"  Chi-square statistic: {stat_results['Security_Distribution']['chi2_statistic']:.3f}")
-print(f"  P-value: {stat_results['Security_Distribution']['p_value']:.4f}")
-print(f"  Degrees of freedom: {stat_results['Security_Distribution']['degrees_of_freedom']}")
-
-# 4. Customer Clustering Analysis
-print("\n4. CUSTOMER SEGMENTATION ANALYSIS")
-print("-" * 40)
-
-customer_clusters = customer_behavior_clustering(df, event_date)
-cluster_summary = customer_clusters.groupby('Cluster_Name').agg({
-    'Foreign_Change_%': 'mean',
-    'Volume_Change_%': 'mean',
-    'Customer': 'count'
-}).round(2)
-
-print("\nCustomer Segment Characteristics:")
-print(cluster_summary)
-
-cluster_fig = create_customer_clustering_plot(customer_clusters)
-plt.savefig('april_customer_clusters.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# 5. Industry Impact Analysis
-print("\n5. INDUSTRY IMPACT ANALYSIS")
-print("-" * 40)
-
-industry_fig = create_industry_heatmap(df, event_date)
-plt.savefig('april_industry_heatmap.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# 6. Time Series Analysis with 99th Percentile Outlier Removal
-print("\n6. TIME SERIES PATTERNS")
-print("-" * 40)
-
-# Daily aggregation
-daily_metrics = df.groupby('Date').agg({
-    'Net_Amount': ['sum', 'count', 'mean']
-}).reset_index()
-
-daily_metrics.columns = ['Date', 'Total_Net_Amount', 'Trade_Count', 'Avg_Net_Amount']
-
-# Remove outliers using 99th percentile instead of IQR
-lower_bound = daily_metrics['Total_Net_Amount'].quantile(0.01)
-upper_bound = daily_metrics['Total_Net_Amount'].quantile(0.99)
-
-# Cap outliers at 99th percentile
-daily_metrics['Total_Net_Amount_cleaned'] = daily_metrics['Total_Net_Amount'].clip(
-    lower=lower_bound, upper=upper_bound
-)
-
-# Calculate rolling averages on cleaned data
-daily_metrics['MA_7'] = daily_metrics['Total_Net_Amount_cleaned'].rolling(window=7, center=True).mean()
-daily_metrics['MA_30'] = daily_metrics['Total_Net_Amount_cleaned'].rolling(window=30, center=True).mean()
-
-# Plot time series
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-
-# Net trading amount
-ax1.plot(daily_metrics['Date'], daily_metrics['Total_Net_Amount_cleaned']/1e6, 
-         alpha=0.3, label='Daily (99th percentile capped)', linewidth=0.5)
-ax1.plot(daily_metrics['Date'], daily_metrics['MA_7']/1e6, label='7-day MA', linewidth=2)
-ax1.plot(daily_metrics['Date'], daily_metrics['MA_30']/1e6, label='30-day MA', linewidth=2)
-ax1.axvline(x=apr_event, color='red', linestyle='--', label='April 2nd Event', linewidth=2)
-ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-ax1.set_ylabel('Net Trading Amount (Million $)')
-ax1.set_title('Net Trading Amount Time Series (Outliers Capped at 99th Percentile)')
-ax1.legend()
-ax1.grid(True, alpha=0.3
+Thanks so much in advance!
