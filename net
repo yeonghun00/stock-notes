@@ -1,4 +1,6 @@
-import requests
+import asyncio
+import aiohttp
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
 import json
 import time
@@ -8,8 +10,9 @@ import logging
 from typing import Dict, List, Optional, Union
 import re
 from dataclasses import dataclass, asdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
+import ssl
+import certifi
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,32 +49,114 @@ class Property:
     property_url: str
     scraped_at: str
 
-class HSE28Scraper:
-    def __init__(self, base_url="https://www.28hse.com", max_workers=5, delay=1):
-        self.base_url = base_url
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        self.max_workers = max_workers
-        self.delay = delay
+class AsyncHSE28Scraper:
+    def __init__(self, base_url="https://www.28hse.com", 
+                 max_concurrent=10, 
+                 delay=0.5,
+                 proxy=None,
+                 proxy_auth=None,
+                 timeout=30):
+        """
+        Initialize async scraper
         
-    def get_soup(self, url: str, retries: int = 3) -> Optional[BeautifulSoup]:
-        """Get BeautifulSoup object from URL with retry logic"""
-        for attempt in range(retries):
-            try:
-                response = self.session.get(url, timeout=10)
-                response.raise_for_status()
-                return BeautifulSoup(response.content, 'html.parser')
-            except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
-                if attempt < retries - 1:
-                    time.sleep(self.delay * (attempt + 1))
+        Args:
+            base_url: Base URL of the website
+            max_concurrent: Maximum concurrent requests
+            delay: Delay between requests in seconds
+            proxy: Proxy URL (e.g., 'http://proxy.company.com:8080')
+            proxy_auth: Tuple of (username, password) for proxy authentication
+            timeout: Request timeout in seconds
+        """
+        self.base_url = base_url
+        self.max_concurrent = max_concurrent
+        self.delay = delay
+        self.proxy = proxy
+        self.proxy_auth = proxy_auth
+        self.timeout = ClientTimeout(total=timeout)
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.session = None
+        
+        # Headers
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+        
+    async def create_session(self):
+        """Create aiohttp session with proxy support"""
+        # SSL context for corporate proxies
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # Connector with connection pooling
+        connector = TCPConnector(
+            limit=100,
+            limit_per_host=30,
+            ssl=ssl_context,
+            force_close=True
+        )
+        
+        # Proxy authentication
+        auth = None
+        if self.proxy_auth:
+            auth = aiohttp.BasicAuth(self.proxy_auth[0], self.proxy_auth[1])
+        
+        self.session = ClientSession(
+            connector=connector,
+            timeout=self.timeout,
+            headers=self.headers,
+            auth=auth
+        )
+    
+    async def close_session(self):
+        """Close aiohttp session"""
+        if self.session:
+            await self.session.close()
+    
+    async def fetch_with_retry(self, url: str, retries: int = 3) -> Optional[str]:
+        """Fetch URL with retry logic and rate limiting"""
+        async with self.semaphore:
+            for attempt in range(retries):
+                try:
+                    kwargs = {}
+                    if self.proxy:
+                        kwargs['proxy'] = self.proxy
+                    
+                    async with self.session.get(url, **kwargs) as response:
+                        response.raise_for_status()
+                        html = await response.text()
+                        
+                        # Rate limiting
+                        await asyncio.sleep(self.delay)
+                        
+                        return html
+                        
+                except aiohttp.ClientError as e:
+                    logger.warning(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(self.delay * (attempt + 1))
+                except Exception as e:
+                    logger.error(f"Unexpected error for {url}: {str(e)}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(self.delay * (attempt + 1))
+        
+        logger.error(f"Failed to fetch {url} after {retries} attempts")
         return None
     
-    def extract_property_list(self, list_url: str) -> List[str]:
+    async def get_soup(self, url: str) -> Optional[BeautifulSoup]:
+        """Get BeautifulSoup object from URL"""
+        html = await self.fetch_with_retry(url)
+        if html:
+            return BeautifulSoup(html, 'html.parser')
+        return None
+    
+    async def extract_property_list(self, list_url: str) -> List[str]:
         """Extract property URLs from the listing page"""
-        soup = self.get_soup(list_url)
+        soup = await self.get_soup(list_url)
         if not soup:
             logger.error(f"Failed to fetch listing page: {list_url}")
             return []
@@ -122,8 +207,6 @@ class HSE28Scraper:
     
     def extract_metric_value(self, container) -> Optional[str]:
         """Extract numeric value from metric container"""
-        # Try to find the value in various ways
-        # Look for next sibling, child elements, or parse the text
         text = container.get_text(strip=True)
         
         # Extract numbers with units (e.g., "11,849", "36.3", "3.42%")
@@ -140,9 +223,9 @@ class HSE28Scraper:
         
         return None
     
-    def extract_property_details(self, url: str) -> Optional[Property]:
+    async def extract_property_details(self, url: str) -> Optional[Property]:
         """Extract property details from property page"""
-        soup = self.get_soup(url)
+        soup = await self.get_soup(url)
         if not soup:
             logger.error(f"Failed to fetch property page: {url}")
             return None
@@ -170,7 +253,7 @@ class HSE28Scraper:
             metrics = self.extract_property_metrics(soup)
             
             # Get transactions
-            transactions = self.extract_transactions(url, property_name)
+            transactions = await self.extract_transactions(url, property_name)
             
             property_obj = Property(
                 property_name=property_name,
@@ -189,12 +272,12 @@ class HSE28Scraper:
             logger.error(f"Error extracting property details from {url}: {str(e)}")
             return None
     
-    def extract_transactions(self, property_url: str, property_name: str) -> List[Transaction]:
+    async def extract_transactions(self, property_url: str, property_name: str) -> List[Transaction]:
         """Extract transactions from property transaction page"""
         # Construct transaction URL
         transaction_url = property_url.rstrip('/') + '/transaction'
         
-        soup = self.get_soup(transaction_url)
+        soup = await self.get_soup(transaction_url)
         if not soup:
             logger.warning(f"No transaction page found for {property_name}")
             return []
@@ -267,36 +350,33 @@ class HSE28Scraper:
         
         return transaction if any([transaction.sold_price, transaction.registry_date]) else None
     
-    def scrape_all_properties(self, list_url: str) -> List[Property]:
+    async def scrape_all_properties(self, list_url: str) -> List[Property]:
         """Scrape all properties from the listing page"""
-        property_urls = self.extract_property_list(list_url)
+        await self.create_session()
         
-        if not property_urls:
-            logger.error("No properties found to scrape")
-            return []
-        
-        properties = []
-        
-        # Use ThreadPoolExecutor for concurrent scraping
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_url = {
-                executor.submit(self.extract_property_details, url): url 
-                for url in property_urls
-            }
+        try:
+            property_urls = await self.extract_property_list(list_url)
             
-            for future in as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    property_data = future.result()
-                    if property_data:
-                        properties.append(property_data)
-                except Exception as e:
-                    logger.error(f"Error processing {url}: {str(e)}")
-                
-                # Add delay between requests
-                time.sleep(self.delay)
-        
-        return properties
+            if not property_urls:
+                logger.error("No properties found to scrape")
+                return []
+            
+            # Process properties concurrently
+            tasks = [self.extract_property_details(url) for url in property_urls]
+            properties = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Filter out None values and exceptions
+            valid_properties = []
+            for prop in properties:
+                if isinstance(prop, Property):
+                    valid_properties.append(prop)
+                elif isinstance(prop, Exception):
+                    logger.error(f"Error during scraping: {str(prop)}")
+            
+            return valid_properties
+            
+        finally:
+            await self.close_session()
     
     def save_to_json(self, properties: List[Property], filename: str = "properties.json"):
         """Save properties to JSON file"""
@@ -348,16 +428,31 @@ class HSE28Scraper:
         
         logger.info(f"Saved data to {filename} and {trans_filename}")
 
-def main():
+async def main():
+    # Configuration with proxy support
+    config = {
+        'max_concurrent': 10,  # Higher concurrency with async
+        'delay': 0.5,          # Shorter delay possible with async
+        'timeout': 30,
+        
+        # Proxy configuration (uncomment and modify as needed)
+        # 'proxy': 'http://proxy.company.com:8080',
+        # 'proxy_auth': ('username', 'password'),  # If authentication required
+    }
+    
     # Initialize scraper
-    scraper = HSE28Scraper(max_workers=3, delay=1.5)
+    scraper = AsyncHSE28Scraper(**config)
     
     # URL to scrape
     list_url = "https://www.28hse.com/en/estate/"
     
     # Scrape all properties
-    logger.info("Starting scraping process...")
-    properties = scraper.scrape_all_properties(list_url)
+    logger.info("Starting async scraping process...")
+    start_time = time.time()
+    
+    properties = await scraper.scrape_all_properties(list_url)
+    
+    elapsed_time = time.time() - start_time
     
     # Save results
     if properties:
@@ -366,11 +461,44 @@ def main():
         
         # Print summary
         total_transactions = sum(len(p.transactions) for p in properties)
-        logger.info(f"\nScraping completed!")
+        logger.info(f"\nScraping completed in {elapsed_time:.2f} seconds!")
         logger.info(f"Total properties: {len(properties)}")
         logger.info(f"Total transactions: {total_transactions}")
+        logger.info(f"Average time per property: {elapsed_time/len(properties):.2f} seconds")
     else:
         logger.error("No properties were scraped successfully")
 
+# Example usage with different proxy configurations
+async def example_with_proxy():
+    # HTTP proxy without authentication
+    scraper1 = AsyncHSE28Scraper(
+        proxy='http://proxy.company.com:8080',
+        max_concurrent=5
+    )
+    
+    # HTTP proxy with authentication
+    scraper2 = AsyncHSE28Scraper(
+        proxy='http://proxy.company.com:8080',
+        proxy_auth=('username', 'password'),
+        max_concurrent=5
+    )
+    
+    # SOCKS proxy (requires aiohttp-socks)
+    # scraper3 = AsyncHSE28Scraper(
+    #     proxy='socks5://proxy.company.com:1080',
+    #     proxy_auth=('username', 'password')
+    # )
+    
+    list_url = "https://www.28hse.com/en/estate/"
+    properties = await scraper1.scrape_all_properties(list_url)
+    return properties
+
 if __name__ == "__main__":
-    main()
+    # Install required packages:
+    # pip install aiohttp beautifulsoup4 certifi
+    
+    # Run the main scraper
+    asyncio.run(main())
+    
+    # Or run with proxy
+    # asyncio.run(example_with_proxy())
