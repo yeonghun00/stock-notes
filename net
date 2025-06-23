@@ -98,16 +98,25 @@ class HSE28Scraper:
         soup = BeautifulSoup(html, 'html.parser')
         property_urls = []
         
-        # Find property links - adjust selector based on actual HTML structure
+        # Find property links - look for estate detail links specifically
         property_links = soup.select('a[href*="/estate/detail/"]')
+        
+        # Also try alternative selectors if needed
+        if not property_links:
+            property_links = soup.select('a.estate-link, a.property-link, .estate-item a')
         
         for link in property_links:
             href = link.get('href')
-            if href:
+            if href and '/estate/detail/' in href:
+                # Skip transaction/photo/other sub-pages
+                if any(sub in href for sub in ['/transaction', '/photo', '/floor-plan']):
+                    continue
+                    
                 full_url = urljoin(self.base_url, href)
                 if full_url not in property_urls:  # Avoid duplicates
                     property_urls.append(full_url)
         
+        logger.info(f"Found {len(property_urls)} unique property URLs")
         return property_urls
     
     async def parse_property_details(self, html: str, url: str) -> Optional[Property]:
@@ -128,25 +137,21 @@ class HSE28Scraper:
                 logger.warning(f"Could not find property name for {url}")
                 return None
             
-            # Extract street number and address
+            # Extract street number from specific anchor tag
             street_num = ""
-            address = ""
+            street_elem = soup.select_one('a[href="#estate_id_map"]')
+            if street_elem:
+                street_num = street_elem.text.strip()
             
-            # Look for address information in various places
-            address_selectors = ['.address', '.location', '[class*="address"]', '.estate-address']
-            for selector in address_selectors:
-                elem = soup.select_one(selector)
-                if elem:
-                    full_address = elem.text.strip()
-                    # Try to extract street number (No.XX pattern)
-                    street_match = re.search(r'No\.\s*\d+[A-Za-z]?\s+[\w\s]+Road', full_address)
-                    if street_match:
-                        street_num = street_match.group()
-                    
-                    # Clean up address
-                    address = re.sub(r'No\.\s*\d+[A-Za-z]?\s+[\w\s]+Road\s*,?\s*', '', full_address)
-                    address = address.strip(', ')
-                    break
+            # Extract address from breadcrumb items
+            address = ""
+            breadcrumb_items = soup.select('a[itemprop="item"] span[itemprop="name"]')
+            if breadcrumb_items:
+                # Get all breadcrumb names and join them
+                address_parts = [item.text.strip() for item in breadcrumb_items if item.text.strip()]
+                # Filter out generic items like "Home" or "Estate"
+                filtered_parts = [part for part in address_parts if part not in ['Home', 'Estate', 'Property']]
+                address = ' > '.join(filtered_parts)
             
             # Create property object
             property_obj = Property(
@@ -191,48 +196,144 @@ class HSE28Scraper:
         transactions = []
         
         try:
-            # Find transaction entries - adjust selector based on actual HTML
-            transaction_blocks = soup.select('.transaction-item, .record-item, [class*="transaction"]')
+            # Find all transaction blocks - try multiple approaches
+            # Method 1: Look for transaction items with specific classes
+            transaction_blocks = soup.select('.transaction-item, .record-item, [class*="transaction-record"], .estate-record-item')
             
-            for block in transaction_blocks:
+            # Method 2: If no blocks found, try to find table rows
+            if not transaction_blocks:
+                # Look for transaction table
+                transaction_table = soup.find('table', class_=re.compile('transaction|record'))
+                if transaction_table:
+                    # Skip header row(s)
+                    transaction_blocks = transaction_table.find_all('tr')[1:]
+            
+            # Method 3: Look for divs containing transaction data patterns
+            if not transaction_blocks:
+                # Find all elements containing "Sold Price" text
+                sold_price_elements = soup.find_all(text=re.compile(r'Sold\s+Price'))
+                for elem in sold_price_elements:
+                    # Get the parent container of this transaction
+                    parent = elem.parent
+                    while parent and parent.name not in ['div', 'tr', 'article', 'section']:
+                        parent = parent.parent
+                    if parent and parent not in transaction_blocks:
+                        transaction_blocks.append(parent)
+            
+            logger.info(f"Found {len(transaction_blocks)} transaction blocks")
+            
+            for idx, block in enumerate(transaction_blocks):
                 try:
-                    text = block.get_text(separator=' ', strip=True)
+                    # Get all text content from the block
+                    text = ' '.join(block.stripped_strings) if hasattr(block, 'stripped_strings') else block.get_text(separator=' ', strip=True)
                     
-                    # Extract unit info
-                    unit_match = re.search(r'(Flat\s+[A-Z0-9]+,\s*[\d/]+F,\s*Tower\s+[\w\s]+)', text)
-                    unit = unit_match.group(1) if unit_match else ""
+                    # Skip if this doesn't look like a transaction
+                    if 'Sold Price' not in text and 'HKD' not in text:
+                        continue
                     
-                    # Extract address (after unit, before Sold Price)
-                    addr_match = re.search(r'Tower\s+[\w\s]+\s+(.+?)\s+Sold\s+Price', text)
-                    trans_address = addr_match.group(1) if addr_match else ""
+                    # Extract unit info - updated pattern to be more flexible
+                    unit = ""
+                    # Try multiple patterns
+                    unit_patterns = [
+                        r'(Flat\s+[A-Z0-9]+(?:/[A-Z0-9]+)?),?\s*([\d/]+F),?\s*(Tower|Block|Building)\s+([A-Z0-9]+(?:\s+[A-Z0-9]+)?)',
+                        r'(Unit\s+[A-Z0-9]+),?\s*([\d/]+F)',
+                        r'(Room\s+[A-Z0-9]+),?\s*([\d/]+F)'
+                    ]
                     
-                    # Extract sold price
-                    price_match = re.search(r'HKD?\$?([\d.]+)\s*Millions?', text, re.IGNORECASE)
-                    sold_price = self.parse_number(price_match.group(0)) if price_match else 0
+                    for pattern in unit_patterns:
+                        unit_match = re.search(pattern, text, re.IGNORECASE)
+                        if unit_match:
+                            unit = unit_match.group(0)
+                            break
+                    
+                    # Extract address - look for text between unit and "Sold Price"
+                    trans_address = ""
+                    if unit:
+                        addr_pattern = rf'{re.escape(unit)}\s+(.+?)\s+Sold\s+Price'
+                        addr_match = re.search(addr_pattern, text, re.IGNORECASE | re.DOTALL)
+                        if addr_match:
+                            trans_address = addr_match.group(1).strip()
+                    
+                    # Extract sold price with better pattern
+                    sold_price = 0
+                    price_patterns = [
+                        r'HKD?\s*\$?\s*([\d.]+)\s*Million',
+                        r'Sold\s+Price[:\s]+HKD?\s*\$?\s*([\d.]+)\s*Million',
+                        r'\$\s*([\d.]+)\s*M(?:illion)?'
+                    ]
+                    
+                    for pattern in price_patterns:
+                        price_match = re.search(pattern, text, re.IGNORECASE)
+                        if price_match:
+                            sold_price = float(price_match.group(1)) * 1000000
+                            break
                     
                     # Extract registry date
-                    date_match = re.search(r'Registry\s+Date:\s*([\d-]+)', text)
-                    registry_date = date_match.group(1) if date_match else ""
+                    registry_date = ""
+                    date_patterns = [
+                        r'Registry\s+Date[:\s]+([\d]{4}-[\d]{2}-[\d]{2})',
+                        r'Date[:\s]+([\d]{4}-[\d]{2}-[\d]{2})',
+                        r'([\d]{4}-[\d]{2}-[\d]{2})'
+                    ]
+                    
+                    for pattern in date_patterns:
+                        date_match = re.search(pattern, text)
+                        if date_match:
+                            registry_date = date_match.group(1)
+                            break
                     
                     # Extract saleable area
-                    area_match = re.search(r'Saleable\s+area:\s*([\d,]+)\s*ft', text, re.IGNORECASE)
-                    saleable_area = int(self.parse_number(area_match.group(1))) if area_match else 0
+                    saleable_area = 0
+                    area_patterns = [
+                        r'Saleable\s+area[:\s]+([\d,]+)\s*(?:sq\s*)?ft',
+                        r'Area[:\s]+([\d,]+)\s*(?:sq\s*)?ft',
+                        r'([\d,]+)\s*ft²'
+                    ]
+                    
+                    for pattern in area_patterns:
+                        area_match = re.search(pattern, text, re.IGNORECASE)
+                        if area_match:
+                            saleable_area = int(area_match.group(1).replace(',', ''))
+                            break
                     
                     # Extract unit price
-                    unit_price_match = re.search(r'Unit\s+Price:\s*\$?([\d,]+)', text, re.IGNORECASE)
-                    unit_price = self.parse_number(unit_price_match.group(1)) if unit_price_match else 0
+                    unit_price = 0
+                    unit_price_patterns = [
+                        r'Unit\s+Price[:\s]+\$?\s*([\d,]+)',
+                        r'Price\s+per\s+ft[:\s]+\$?\s*([\d,]+)',
+                        r'\$\s*([\d,]+)\s*/\s*ft'
+                    ]
+                    
+                    for pattern in unit_price_patterns:
+                        price_match = re.search(pattern, text, re.IGNORECASE)
+                        if price_match:
+                            unit_price = float(price_match.group(1).replace(',', ''))
+                            break
                     
                     # Extract bedrooms
-                    bedroom_match = re.search(r'Bedroom:\s*(\d+)', text)
-                    bedrooms = int(bedroom_match.group(1)) if bedroom_match else None
+                    bedrooms = None
+                    bedroom_patterns = [
+                        r'Bedroom[s]?[:\s]+(\d+)',
+                        r'(\d+)\s*Bedroom',
+                        r'(\d+)\s*Room[s]?'
+                    ]
+                    
+                    for pattern in bedroom_patterns:
+                        bedroom_match = re.search(pattern, text, re.IGNORECASE)
+                        if bedroom_match:
+                            bedrooms = int(bedroom_match.group(1))
+                            break
                     
                     # Extract transaction format
-                    format_match = re.search(r'Transaction\s+Format:\s*(.+?)(?:\s|$)', text)
-                    transaction_format = format_match.group(1) if format_match else "Land Registry"
+                    transaction_format = "Land Registry"  # Default
+                    format_match = re.search(r'Transaction\s+Format[:\s]+([^,\n]+)', text, re.IGNORECASE)
+                    if format_match:
+                        transaction_format = format_match.group(1).strip()
                     
-                    if sold_price > 0:  # Only add valid transactions
+                    # Only add if we have essential data
+                    if sold_price > 0 or saleable_area > 0:
                         transaction = Transaction(
-                            unit=unit,
+                            unit=unit or f"Transaction {idx + 1}",
                             address=trans_address,
                             sold_price=sold_price,
                             registry_date=registry_date,
@@ -242,14 +343,16 @@ class HSE28Scraper:
                             transaction_format=transaction_format
                         )
                         transactions.append(transaction)
+                        logger.debug(f"Added transaction: {unit} - ${sold_price/1000000:.2f}M")
                         
                 except Exception as e:
-                    logger.warning(f"Error parsing individual transaction: {str(e)}")
+                    logger.warning(f"Error parsing transaction {idx}: {str(e)}")
                     continue
                     
         except Exception as e:
             logger.error(f"Error parsing transactions: {str(e)}")
         
+        logger.info(f"Successfully parsed {len(transactions)} transactions")
         return transactions
     
     async def scrape_property_with_transactions(self, property_url: str) -> Optional[Property]:
@@ -342,13 +445,25 @@ async def main():
         total_transactions = sum(len(p.transactions) for p in properties)
         print(f"Total transactions: {total_transactions}")
         
-        # Print sample data
+        # Print sample data with more details
         if properties:
             print(f"\nSample property:")
             print(f"Name: {properties[0].property_name}")
-            print(f"Address: {properties[0].street_num}, {properties[0].address}")
+            print(f"Street: {properties[0].street_num}")
+            print(f"Address: {properties[0].address}")
             print(f"Metrics: {properties[0].metrics}")
             print(f"Transactions: {len(properties[0].transactions)}")
+            
+            # Show first few transactions if available
+            if properties[0].transactions:
+                print(f"\nFirst 3 transactions:")
+                for i, trans in enumerate(properties[0].transactions[:3]):
+                    print(f"\n  Transaction {i+1}:")
+                    print(f"  Unit: {trans.unit}")
+                    print(f"  Price: HKD${trans.sold_price/1000000:.2f}M")
+                    print(f"  Date: {trans.registry_date}")
+                    print(f"  Area: {trans.saleable_area} sqft")
+                    print(f"  Unit Price: ${trans.unit_price}")
 
 if __name__ == "__main__":
     asyncio.run(main())
