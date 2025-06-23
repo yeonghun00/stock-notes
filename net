@@ -44,6 +44,13 @@ class Property:
 
 class HSE28Scraper:
     def __init__(self, max_pages: int = 5, max_concurrent_requests: int = 5):
+        """
+        Initialize the scraper
+        
+        Args:
+            max_pages: Maximum pages to scrape (applies to both property listings AND transaction listings)
+            max_concurrent_requests: Maximum concurrent HTTP requests
+        """
         self.base_url = "https://www.28hse.com"
         self.max_pages = max_pages
         self.max_concurrent_requests = max_concurrent_requests
@@ -189,6 +196,165 @@ class HSE28Scraper:
         except Exception as e:
             logger.error(f"Error parsing property details from {url}: {str(e)}")
             return None
+    
+    async def parse_transaction_listing_page(self, html: str) -> List[str]:
+        """Parse individual transaction URLs from transaction listing page"""
+        soup = BeautifulSoup(html, 'html.parser')
+        transaction_urls = []
+        
+        # Find all transaction detail links
+        detail_links = soup.select('a.detail_page[href*="/transaction/deal-"]')
+        
+        for link in detail_links:
+            href = link.get('href')
+            if href:
+                full_url = urljoin(self.base_url, href)
+                if full_url not in transaction_urls:
+                    transaction_urls.append(full_url)
+        
+        logger.info(f"Found {len(transaction_urls)} transaction URLs on this page")
+        return transaction_urls
+    
+    async def parse_single_transaction(self, html: str, url: str) -> Optional[Transaction]:
+        """Parse a single transaction from its detail page"""
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        try:
+            # Extract property and unit info from title/header
+            unit = ""
+            header = soup.find('h1') or soup.find('title')
+            if header:
+                header_text = header.get_text(strip=True)
+                # Extract unit info from header
+                unit_match = re.search(r'(Flat|Unit|Room)\s+[A-Z0-9]+[,\s]+[\d/]+F[,\s]+(Tower|Block|Building)?\s*[A-Z0-9]*', header_text, re.IGNORECASE)
+                if unit_match:
+                    unit = unit_match.group(0).strip()
+            
+            # Initialize transaction data
+            trans_data = {
+                'unit': unit,
+                'address': "",
+                'sold_price': 0,
+                'registry_date': "",
+                'saleable_area': 0,
+                'unit_price': 0,
+                'bedrooms': None,
+                'transaction_format': "Land Registry"
+            }
+            
+            # Find all table cells with labels
+            info_table = soup.find('table', class_=re.compile('info|detail|transaction'))
+            if not info_table:
+                # Try to find any table
+                info_table = soup.find('table')
+            
+            if info_table:
+                rows = info_table.find_all('tr')
+                for row in rows:
+                    cells = row.find_all(['td', 'th'])
+                    if len(cells) >= 2:
+                        label = cells[0].get_text(strip=True)
+                        value = cells[1].get_text(strip=True)
+                        
+                        # Extract based on label
+                        if 'Address' in label or 'Location' in label:
+                            trans_data['address'] = value
+                        elif 'Sold Price' in label:
+                            # Parse price
+                            price_match = re.search(r'([\d.]+)\s*M(?:illion)?', value, re.IGNORECASE)
+                            if price_match:
+                                trans_data['sold_price'] = float(price_match.group(1)) * 1000000
+                            else:
+                                # Try regular number
+                                num_match = re.search(r'[\d,]+', value)
+                                if num_match:
+                                    trans_data['sold_price'] = float(num_match.group(0).replace(',', ''))
+                        elif 'Registry Date' in label:
+                            trans_data['registry_date'] = value
+                        elif 'Saleable area' in label:
+                            area_match = re.search(r'([\d,]+)', value)
+                            if area_match:
+                                trans_data['saleable_area'] = int(area_match.group(1).replace(',', ''))
+                        elif 'Unit Price' in label and 'Building' not in label:
+                            price_match = re.search(r'([\d,]+)', value)
+                            if price_match:
+                                trans_data['unit_price'] = float(price_match.group(1).replace(',', ''))
+                        elif 'Bedroom' in label:
+                            bed_match = re.search(r'(\d+)', value)
+                            if bed_match:
+                                trans_data['bedrooms'] = int(bed_match.group(1))
+                        elif 'Transaction Format' in label:
+                            trans_data['transaction_format'] = value
+            
+            # Only create transaction if we have essential data
+            if trans_data['sold_price'] > 0 or trans_data['saleable_area'] > 0:
+                return Transaction(**trans_data)
+            else:
+                logger.warning(f"No valid transaction data found at {url}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error parsing transaction from {url}: {str(e)}")
+            return None
+    
+    async def scrape_all_transactions(self, transaction_base_url: str, max_pages: int = None) -> List[Transaction]:
+        """Scrape all transactions for a property with pagination"""
+        all_transactions = []
+        all_transaction_urls = []
+        page_limit = max_pages or self.max_pages
+        
+        # Scrape transaction listing pages
+        for page_num in range(1, page_limit + 1):
+            if page_num == 1:
+                list_url = transaction_base_url
+            else:
+                list_url = f"{transaction_base_url}?page={page_num}"
+            
+            logger.info(f"Fetching transaction listing page {page_num}")
+            html = await self.fetch_page(list_url)
+            
+            if not html:
+                logger.warning(f"Failed to fetch transaction listing page {page_num}")
+                break
+            
+            # Get transaction URLs from this page
+            transaction_urls = await self.parse_transaction_listing_page(html)
+            
+            if not transaction_urls:
+                logger.info("No more transactions found")
+                break
+                
+            all_transaction_urls.extend(transaction_urls)
+            
+            # If user didn't set a limit, check if there's a next page
+            if max_pages is None:
+                soup = BeautifulSoup(html, 'html.parser')
+                next_link = soup.find('a', text=re.compile('Next|›|»'))
+                if not next_link or 'disabled' in next_link.get('class', []):
+                    break
+        
+        logger.info(f"Total transaction URLs collected: {len(all_transaction_urls)}")
+        
+        # Now scrape each individual transaction
+        tasks = []
+        for url in all_transaction_urls:
+            task = self.fetch_and_parse_transaction(url)
+            tasks.append(task)
+        
+        # Process in batches to avoid overwhelming the server
+        results = await asyncio.gather(*tasks)
+        
+        # Filter out None results
+        all_transactions = [t for t in results if t is not None]
+        
+        return all_transactions
+    
+    async def fetch_and_parse_transaction(self, url: str) -> Optional[Transaction]:
+        """Fetch and parse a single transaction page"""
+        html = await self.fetch_page(url)
+        if html:
+            return await self.parse_single_transaction(html, url)
+        return None
     
     async def parse_transactions(self, html: str) -> List[Transaction]:
         """Parse transaction data from transaction page"""
@@ -367,7 +533,108 @@ class HSE28Scraper:
             return None
         
         # Extract property ID from URL to construct transaction URL
-        property_id_match = re.search(r'/estate/detail/([^/]+?)(?:-(\d+))?/?$', property_url)
+        property_id_match = re.search(r'/estate/detail/([^/]+?)(?:-(\d+))?/?
+    
+    async def scrape_all(self) -> List[Property]:
+        """Main scraping method"""
+        all_properties = []
+        
+        # Scrape listing pages
+        for page_num in range(1, self.max_pages + 1):
+            if page_num == 1:
+                list_url = f"{self.base_url}/en/estate/"
+            else:
+                list_url = f"{self.base_url}/en/estate/?page={page_num}"
+            
+            logger.info(f"Scraping listing page {page_num}")
+            html = await self.fetch_page(list_url)
+            
+            if not html:
+                logger.warning(f"Failed to fetch listing page {page_num}")
+                continue
+            
+            property_urls = await self.parse_listing_page(html)
+            logger.info(f"Found {len(property_urls)} properties on page {page_num}")
+            
+            if not property_urls:
+                break  # No more properties
+            
+            # Scrape each property concurrently
+            tasks = [self.scrape_property_with_transactions(url) for url in property_urls]
+            results = await asyncio.gather(*tasks)
+            
+            # Filter out None results
+            valid_properties = [p for p in results if p is not None]
+            all_properties.extend(valid_properties)
+            
+            logger.info(f"Successfully scraped {len(valid_properties)} properties from page {page_num}")
+        
+        return all_properties
+
+async def main():
+    """
+    Example usage of the HSE28 scraper
+    
+    The scraper works in the following steps:
+    1. Scrapes property listing pages (up to max_pages)
+    2. For each property, gets the details (name, address, metrics)
+    3. Goes to the property's transaction listing page
+    4. Paginates through transaction listings (up to max_pages)
+    5. Visits each individual transaction page to get full details
+    """
+    # Set the number of pages to scrape
+    MAX_PAGES = 2  # Applies to BOTH property listings AND transaction listings per property
+    
+    async with HSE28Scraper(max_pages=MAX_PAGES, max_concurrent_requests=5) as scraper:
+        properties = await scraper.scrape_all()
+        
+        # Convert to JSON-serializable format
+        data = []
+        for prop in properties:
+            prop_dict = asdict(prop)
+            data.append(prop_dict)
+        
+        # Save to JSON file
+        with open('28hse_properties.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        # Print summary
+        print(f"\nScraped {len(properties)} properties")
+        total_transactions = sum(len(p.transactions) for p in properties)
+        print(f"Total transactions: {total_transactions}")
+        
+        # Print sample data with more details
+        if properties:
+            print(f"\nSample property:")
+            print(f"Name: {properties[0].property_name}")
+            print(f"Street: {properties[0].street_num}")
+            print(f"Address: {properties[0].address}")
+            print(f"Metrics: {properties[0].metrics}")
+            print(f"Transactions: {len(properties[0].transactions)}")
+            
+            # Show first few transactions if available
+            if properties[0].transactions:
+                print(f"\nFirst 3 transactions:")
+                for i, trans in enumerate(properties[0].transactions[:3]):
+                    print(f"\n  Transaction {i+1}:")
+                    print(f"  Unit: {trans.unit}")
+                    print(f"  Price: HKD${trans.sold_price/1000000:.2f}M")
+                    print(f"  Date: {trans.registry_date}")
+                    print(f"  Area: {trans.saleable_area} sqft")
+                    print(f"  Unit Price: ${trans.unit_price}")
+
+if __name__ == "__main__":
+    # Example 1: Scrape with page limits
+    asyncio.run(main())
+    
+    # Example 2: Scrape all pages (no limit)
+    # async def scrape_all_pages():
+    #     async with HSE28Scraper(max_pages=None, max_concurrent_requests=5) as scraper:
+    #         properties = await scraper.scrape_all()
+    #         print(f"Scraped {len(properties)} properties with no page limit")
+    # 
+    # asyncio.run(scrape_all_pages())
+, property_url)
         if property_id_match:
             property_slug = property_id_match.group(1)
             property_id = property_id_match.group(2) or ""
@@ -378,11 +645,9 @@ class HSE28Scraper:
             else:
                 transaction_url = f"{self.base_url}/en/estate/detail/{property_slug}/transaction"
             
-            # Fetch transactions
-            trans_html = await self.fetch_page(transaction_url)
-            if trans_html:
-                property_obj.transactions = await self.parse_transactions(trans_html)
-                logger.info(f"Found {len(property_obj.transactions)} transactions for {property_obj.property_name}")
+            # Scrape all transactions with pagination
+            property_obj.transactions = await self.scrape_all_transactions(transaction_url, self.max_pages)
+            logger.info(f"Found {len(property_obj.transactions)} transactions for {property_obj.property_name}")
         
         return property_obj
     
