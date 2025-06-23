@@ -1,18 +1,13 @@
 import asyncio
 import aiohttp
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
-import json
-import time
-from urllib.parse import urljoin, urlparse
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
-import logging
-from typing import Dict, List, Optional, Union
 import re
-from dataclasses import dataclass, asdict
-import csv
-import ssl
-import certifi
+import json
+from urllib.parse import urljoin, urlparse
+import logging
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,485 +15,340 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PropertyMetrics:
-    """Data class for property metrics"""
-    avg_price_per_sqft: Optional[str] = None
-    avg_rent: Optional[str] = None
-    avg_return: Optional[str] = None
+    """Store property metrics with None defaults for missing data"""
+    avg_price_per_sqft: Optional[float] = None
+    avg_rent: Optional[float] = None
+    avg_return: Optional[float] = None
 
 @dataclass
 class Transaction:
-    """Data class for property transactions"""
-    property_name: str
-    unit_details: str
+    """Store individual transaction data"""
+    unit: str
     address: str
-    sold_price: Optional[str] = None
-    registry_date: Optional[str] = None
-    saleable_area: Optional[str] = None
-    unit_price: Optional[str] = None
-    bedroom: Optional[str] = None
-    transaction_format: Optional[str] = None
+    sold_price: float
+    registry_date: str
+    saleable_area: int
+    unit_price: float
+    bedrooms: Optional[int] = None
+    transaction_format: str = ""
 
 @dataclass
 class Property:
-    """Data class for property information"""
+    """Main property data structure"""
     property_name: str
     street_num: str
     address: str
-    metrics: PropertyMetrics
-    transactions: List[Transaction]
-    property_url: str
-    scraped_at: str
+    detail_url: str
+    metrics: PropertyMetrics = field(default_factory=PropertyMetrics)
+    transactions: List[Transaction] = field(default_factory=list)
 
-class AsyncHSE28Scraper:
-    def __init__(self, base_url="https://www.28hse.com", 
-                 max_concurrent=10, 
-                 delay=0.5,
-                 proxy=None,
-                 proxy_auth=None,
-                 timeout=30):
-        """
-        Initialize async scraper
+class HSE28Scraper:
+    def __init__(self, max_pages: int = 5, max_concurrent_requests: int = 5):
+        self.base_url = "https://www.28hse.com"
+        self.max_pages = max_pages
+        self.max_concurrent_requests = max_concurrent_requests
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.semaphore: Optional[asyncio.Semaphore] = None
         
-        Args:
-            base_url: Base URL of the website
-            max_concurrent: Maximum concurrent requests
-            delay: Delay between requests in seconds
-            proxy: Proxy URL (e.g., 'http://proxy.company.com:8080')
-            proxy_auth: Tuple of (username, password) for proxy authentication
-            timeout: Request timeout in seconds
-        """
-        self.base_url = base_url
-        self.max_concurrent = max_concurrent
-        self.delay = delay
-        self.proxy = proxy
-        self.proxy_auth = proxy_auth
-        self.timeout = ClientTimeout(total=timeout)
-        self.semaphore = asyncio.Semaphore(max_concurrent)
-        self.session = None
+    async def __aenter__(self):
+        """Async context manager entry"""
+        self.session = aiohttp.ClientSession()
+        self.semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+        return self
         
-        # Headers
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-        }
-        
-    async def create_session(self):
-        """Create aiohttp session with proxy support"""
-        # SSL context for corporate proxies
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        # Connector with connection pooling
-        connector = TCPConnector(
-            limit=100,
-            limit_per_host=30,
-            ssl=ssl_context,
-            force_close=True
-        )
-        
-        # Proxy authentication
-        auth = None
-        if self.proxy_auth:
-            auth = aiohttp.BasicAuth(self.proxy_auth[0], self.proxy_auth[1])
-        
-        self.session = ClientSession(
-            connector=connector,
-            timeout=self.timeout,
-            headers=self.headers,
-            auth=auth
-        )
-    
-    async def close_session(self):
-        """Close aiohttp session"""
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
         if self.session:
             await self.session.close()
     
-    async def fetch_with_retry(self, url: str, retries: int = 3) -> Optional[str]:
-        """Fetch URL with retry logic and rate limiting"""
+    async def fetch_page(self, url: str) -> Optional[str]:
+        """Fetch a page with rate limiting and error handling"""
         async with self.semaphore:
-            for attempt in range(retries):
-                try:
-                    kwargs = {}
-                    if self.proxy:
-                        kwargs['proxy'] = self.proxy
-                    
-                    async with self.session.get(url, **kwargs) as response:
-                        response.raise_for_status()
-                        html = await response.text()
-                        
-                        # Rate limiting
-                        await asyncio.sleep(self.delay)
-                        
-                        return html
-                        
-                except aiohttp.ClientError as e:
-                    logger.warning(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
-                    if attempt < retries - 1:
-                        await asyncio.sleep(self.delay * (attempt + 1))
-                except Exception as e:
-                    logger.error(f"Unexpected error for {url}: {str(e)}")
-                    if attempt < retries - 1:
-                        await asyncio.sleep(self.delay * (attempt + 1))
+            try:
+                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        return await response.text()
+                    else:
+                        logger.error(f"Failed to fetch {url}: Status {response.status}")
+                        return None
+            except Exception as e:
+                logger.error(f"Error fetching {url}: {str(e)}")
+                return None
+    
+    def parse_number(self, text: str) -> Optional[float]:
+        """Extract number from text, handling various formats"""
+        if not text:
+            return None
         
-        logger.error(f"Failed to fetch {url} after {retries} attempts")
+        # Remove currency symbols and common text
+        text = re.sub(r'[HKD$,]', '', text)
+        text = re.sub(r'Millions?', '000000', text, flags=re.IGNORECASE)
+        
+        # Find number pattern
+        match = re.search(r'[\d.]+', text)
+        if match:
+            try:
+                return float(match.group())
+            except ValueError:
+                return None
         return None
     
-    async def get_soup(self, url: str) -> Optional[BeautifulSoup]:
-        """Get BeautifulSoup object from URL"""
-        html = await self.fetch_with_retry(url)
-        if html:
-            return BeautifulSoup(html, 'html.parser')
-        return None
-    
-    async def extract_property_list(self, list_url: str) -> List[str]:
-        """Extract property URLs from the listing page"""
-        soup = await self.get_soup(list_url)
-        if not soup:
-            logger.error(f"Failed to fetch listing page: {list_url}")
-            return []
-        
+    async def parse_listing_page(self, html: str) -> List[str]:
+        """Parse property URLs from listing page"""
+        soup = BeautifulSoup(html, 'html.parser')
         property_urls = []
-        # Look for property links - adjust selector based on actual HTML structure
-        property_links = soup.find_all('a', href=re.compile(r'/en/estate/detail/'))
+        
+        # Find property links - adjust selector based on actual HTML structure
+        property_links = soup.select('a[href*="/estate/detail/"]')
         
         for link in property_links:
             href = link.get('href')
             if href:
                 full_url = urljoin(self.base_url, href)
-                if full_url not in property_urls:
+                if full_url not in property_urls:  # Avoid duplicates
                     property_urls.append(full_url)
         
-        logger.info(f"Found {len(property_urls)} properties")
         return property_urls
     
-    def extract_property_metrics(self, soup: BeautifulSoup) -> PropertyMetrics:
-        """Extract property metrics from the page"""
-        metrics = PropertyMetrics()
-        
-        # Look for metric containers - these selectors need to be adjusted based on actual HTML
-        metric_containers = soup.find_all(['div', 'span'], class_=re.compile(r'metric|stat|price'))
-        
-        for container in metric_containers:
-            text = container.get_text(strip=True).lower()
-            
-            # Extract average price per sqft
-            if 'avg. price per sqft' in text or 'average price' in text:
-                value = self.extract_metric_value(container)
-                if value:
-                    metrics.avg_price_per_sqft = value
-            
-            # Extract average rent
-            elif 'avg. rent' in text or 'average rent' in text:
-                value = self.extract_metric_value(container)
-                if value:
-                    metrics.avg_rent = value
-            
-            # Extract average return
-            elif 'avg. return' in text or 'average return' in text:
-                value = self.extract_metric_value(container)
-                if value:
-                    metrics.avg_return = value
-        
-        return metrics
-    
-    def extract_metric_value(self, container) -> Optional[str]:
-        """Extract numeric value from metric container"""
-        text = container.get_text(strip=True)
-        
-        # Extract numbers with units (e.g., "11,849", "36.3", "3.42%")
-        match = re.search(r'[\d,]+\.?\d*%?', text)
-        if match:
-            return match.group()
-        
-        # Check next sibling
-        next_elem = container.find_next_sibling()
-        if next_elem:
-            match = re.search(r'[\d,]+\.?\d*%?', next_elem.get_text(strip=True))
-            if match:
-                return match.group()
-        
-        return None
-    
-    async def extract_property_details(self, url: str) -> Optional[Property]:
-        """Extract property details from property page"""
-        soup = await self.get_soup(url)
-        if not soup:
-            logger.error(f"Failed to fetch property page: {url}")
-            return None
+    async def parse_property_details(self, html: str, url: str) -> Optional[Property]:
+        """Parse property details from detail page"""
+        soup = BeautifulSoup(html, 'html.parser')
         
         try:
-            # Extract property name
+            # Extract property name - try multiple selectors
             property_name = ""
-            name_elem = soup.find(['h1', 'h2'], class_=re.compile(r'property|title|name'))
-            if name_elem:
-                property_name = name_elem.get_text(strip=True)
+            name_selectors = ['h1', '.property-name', '.estate-name', '[class*="title"]']
+            for selector in name_selectors:
+                elem = soup.select_one(selector)
+                if elem and elem.text.strip():
+                    property_name = elem.text.strip()
+                    break
             
-            # Extract street number
+            if not property_name:
+                logger.warning(f"Could not find property name for {url}")
+                return None
+            
+            # Extract street number and address
             street_num = ""
-            street_elem = soup.find(text=re.compile(r'No\.\s*\d+'))
-            if street_elem:
-                street_num = street_elem.strip()
-            
-            # Extract address
             address = ""
-            address_elem = soup.find(['div', 'span'], class_=re.compile(r'address|location'))
-            if address_elem:
-                address = address_elem.get_text(strip=True)
             
-            # Extract metrics
-            metrics = self.extract_property_metrics(soup)
+            # Look for address information in various places
+            address_selectors = ['.address', '.location', '[class*="address"]', '.estate-address']
+            for selector in address_selectors:
+                elem = soup.select_one(selector)
+                if elem:
+                    full_address = elem.text.strip()
+                    # Try to extract street number (No.XX pattern)
+                    street_match = re.search(r'No\.\s*\d+[A-Za-z]?\s+[\w\s]+Road', full_address)
+                    if street_match:
+                        street_num = street_match.group()
+                    
+                    # Clean up address
+                    address = re.sub(r'No\.\s*\d+[A-Za-z]?\s+[\w\s]+Road\s*,?\s*', '', full_address)
+                    address = address.strip(', ')
+                    break
             
-            # Get transactions
-            transactions = await self.extract_transactions(url, property_name)
-            
+            # Create property object
             property_obj = Property(
                 property_name=property_name,
                 street_num=street_num,
                 address=address,
-                metrics=metrics,
-                transactions=transactions,
-                property_url=url,
-                scraped_at=datetime.now().isoformat()
+                detail_url=url
             )
             
-            logger.info(f"Successfully scraped: {property_name}")
+            # Extract metrics
+            metrics_data = {}
+            
+            # Look for metric patterns in the page
+            text_content = soup.get_text()
+            
+            # Average price per sqft
+            price_match = re.search(r'([\d,]+)\s*(?:Avg\.?\s*)?price\s*per\s*sqft', text_content, re.IGNORECASE)
+            if price_match:
+                metrics_data['avg_price_per_sqft'] = self.parse_number(price_match.group(1))
+            
+            # Average rent
+            rent_match = re.search(r'([\d.]+)\s*(?:Avg\.?\s*)?rent', text_content, re.IGNORECASE)
+            if rent_match:
+                metrics_data['avg_rent'] = self.parse_number(rent_match.group(1))
+            
+            # Average return
+            return_match = re.search(r'([\d.]+)%?\s*(?:Avg\.?\s*)?return', text_content, re.IGNORECASE)
+            if return_match:
+                metrics_data['avg_return'] = self.parse_number(return_match.group(1))
+            
+            property_obj.metrics = PropertyMetrics(**metrics_data)
+            
             return property_obj
             
         except Exception as e:
-            logger.error(f"Error extracting property details from {url}: {str(e)}")
+            logger.error(f"Error parsing property details from {url}: {str(e)}")
             return None
     
-    async def extract_transactions(self, property_url: str, property_name: str) -> List[Transaction]:
-        """Extract transactions from property transaction page"""
-        # Construct transaction URL
-        transaction_url = property_url.rstrip('/') + '/transaction'
-        
-        soup = await self.get_soup(transaction_url)
-        if not soup:
-            logger.warning(f"No transaction page found for {property_name}")
-            return []
-        
+    async def parse_transactions(self, html: str) -> List[Transaction]:
+        """Parse transaction data from transaction page"""
+        soup = BeautifulSoup(html, 'html.parser')
         transactions = []
         
-        # Look for transaction entries - adjust selector based on actual HTML
-        transaction_elements = soup.find_all(['div', 'tr'], class_=re.compile(r'transaction|record'))
+        try:
+            # Find transaction entries - adjust selector based on actual HTML
+            transaction_blocks = soup.select('.transaction-item, .record-item, [class*="transaction"]')
+            
+            for block in transaction_blocks:
+                try:
+                    text = block.get_text(separator=' ', strip=True)
+                    
+                    # Extract unit info
+                    unit_match = re.search(r'(Flat\s+[A-Z0-9]+,\s*[\d/]+F,\s*Tower\s+[\w\s]+)', text)
+                    unit = unit_match.group(1) if unit_match else ""
+                    
+                    # Extract address (after unit, before Sold Price)
+                    addr_match = re.search(r'Tower\s+[\w\s]+\s+(.+?)\s+Sold\s+Price', text)
+                    trans_address = addr_match.group(1) if addr_match else ""
+                    
+                    # Extract sold price
+                    price_match = re.search(r'HKD?\$?([\d.]+)\s*Millions?', text, re.IGNORECASE)
+                    sold_price = self.parse_number(price_match.group(0)) if price_match else 0
+                    
+                    # Extract registry date
+                    date_match = re.search(r'Registry\s+Date:\s*([\d-]+)', text)
+                    registry_date = date_match.group(1) if date_match else ""
+                    
+                    # Extract saleable area
+                    area_match = re.search(r'Saleable\s+area:\s*([\d,]+)\s*ft', text, re.IGNORECASE)
+                    saleable_area = int(self.parse_number(area_match.group(1))) if area_match else 0
+                    
+                    # Extract unit price
+                    unit_price_match = re.search(r'Unit\s+Price:\s*\$?([\d,]+)', text, re.IGNORECASE)
+                    unit_price = self.parse_number(unit_price_match.group(1)) if unit_price_match else 0
+                    
+                    # Extract bedrooms
+                    bedroom_match = re.search(r'Bedroom:\s*(\d+)', text)
+                    bedrooms = int(bedroom_match.group(1)) if bedroom_match else None
+                    
+                    # Extract transaction format
+                    format_match = re.search(r'Transaction\s+Format:\s*(.+?)(?:\s|$)', text)
+                    transaction_format = format_match.group(1) if format_match else "Land Registry"
+                    
+                    if sold_price > 0:  # Only add valid transactions
+                        transaction = Transaction(
+                            unit=unit,
+                            address=trans_address,
+                            sold_price=sold_price,
+                            registry_date=registry_date,
+                            saleable_area=saleable_area,
+                            unit_price=unit_price,
+                            bedrooms=bedrooms,
+                            transaction_format=transaction_format
+                        )
+                        transactions.append(transaction)
+                        
+                except Exception as e:
+                    logger.warning(f"Error parsing individual transaction: {str(e)}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error parsing transactions: {str(e)}")
         
-        for elem in transaction_elements:
-            try:
-                transaction = self.parse_transaction(elem, property_name)
-                if transaction:
-                    transactions.append(transaction)
-            except Exception as e:
-                logger.warning(f"Error parsing transaction: {str(e)}")
-        
-        logger.info(f"Found {len(transactions)} transactions for {property_name}")
         return transactions
     
-    def parse_transaction(self, elem, property_name: str) -> Optional[Transaction]:
-        """Parse individual transaction element"""
-        text = elem.get_text(separator=' ', strip=True)
+    async def scrape_property_with_transactions(self, property_url: str) -> Optional[Property]:
+        """Scrape a property and its transactions"""
+        # Fetch property details
+        html = await self.fetch_page(property_url)
+        if not html:
+            return None
         
-        transaction = Transaction(
-            property_name=property_name,
-            unit_details="",
-            address=""
-        )
+        property_obj = await self.parse_property_details(html, property_url)
+        if not property_obj:
+            return None
         
-        # Extract unit details (e.g., "Flat B6, 25/F, Tower 3b")
-        unit_match = re.search(r'(Flat|Unit)\s+[A-Z0-9]+.*?(?=Tin|Sold|$)', text)
-        if unit_match:
-            transaction.unit_details = unit_match.group().strip()
+        # Extract property ID from URL to construct transaction URL
+        property_id_match = re.search(r'/estate/detail/([^/]+?)(?:-(\d+))?/?$', property_url)
+        if property_id_match:
+            property_slug = property_id_match.group(1)
+            property_id = property_id_match.group(2) or ""
+            
+            # Construct transaction URL
+            if property_id:
+                transaction_url = f"{self.base_url}/en/estate/detail/{property_slug}-{property_id}/transaction"
+            else:
+                transaction_url = f"{self.base_url}/en/estate/detail/{property_slug}/transaction"
+            
+            # Fetch transactions
+            trans_html = await self.fetch_page(transaction_url)
+            if trans_html:
+                property_obj.transactions = await self.parse_transactions(trans_html)
+                logger.info(f"Found {len(property_obj.transactions)} transactions for {property_obj.property_name}")
         
-        # Extract address
-        addr_match = re.search(r'(Tin.*?Road|[A-Z][a-z]+.*?Road)', text)
-        if addr_match:
-            transaction.address = addr_match.group().strip()
-        
-        # Extract sold price
-        price_match = re.search(r'Sold Price:?\s*HKD?\$?([\d.]+)\s*Million', text, re.IGNORECASE)
-        if price_match:
-            transaction.sold_price = f"HKD${price_match.group(1)} Million"
-        
-        # Extract registry date
-        date_match = re.search(r'Registry Date:?\s*([\d-]+)', text)
-        if date_match:
-            transaction.registry_date = date_match.group(1)
-        
-        # Extract saleable area
-        area_match = re.search(r'Saleable area:?\s*([\d,]+)\s*ft', text)
-        if area_match:
-            transaction.saleable_area = f"{area_match.group(1)}ft²"
-        
-        # Extract unit price
-        unit_price_match = re.search(r'Unit Price:?\s*\$?([\d,]+)', text)
-        if unit_price_match:
-            transaction.unit_price = f"${unit_price_match.group(1)}"
-        
-        # Extract bedroom info
-        bedroom_match = re.search(r'Bedroom:?\s*(\d+)\s*Room', text)
-        if bedroom_match:
-            transaction.bedroom = f"{bedroom_match.group(1)} Rooms"
-        
-        # Extract transaction format
-        format_match = re.search(r'Transaction Format:?\s*([^$]+?)(?=\s*$)', text)
-        if format_match:
-            transaction.transaction_format = format_match.group(1).strip()
-        
-        return transaction if any([transaction.sold_price, transaction.registry_date]) else None
+        return property_obj
     
-    async def scrape_all_properties(self, list_url: str) -> List[Property]:
-        """Scrape all properties from the listing page"""
-        await self.create_session()
+    async def scrape_all(self) -> List[Property]:
+        """Main scraping method"""
+        all_properties = []
         
-        try:
-            property_urls = await self.extract_property_list(list_url)
+        # Scrape listing pages
+        for page_num in range(1, self.max_pages + 1):
+            if page_num == 1:
+                list_url = f"{self.base_url}/en/estate/"
+            else:
+                list_url = f"{self.base_url}/en/estate/?page={page_num}"
+            
+            logger.info(f"Scraping listing page {page_num}")
+            html = await self.fetch_page(list_url)
+            
+            if not html:
+                logger.warning(f"Failed to fetch listing page {page_num}")
+                continue
+            
+            property_urls = await self.parse_listing_page(html)
+            logger.info(f"Found {len(property_urls)} properties on page {page_num}")
             
             if not property_urls:
-                logger.error("No properties found to scrape")
-                return []
+                break  # No more properties
             
-            # Process properties concurrently
-            tasks = [self.extract_property_details(url) for url in property_urls]
-            properties = await asyncio.gather(*tasks, return_exceptions=True)
+            # Scrape each property concurrently
+            tasks = [self.scrape_property_with_transactions(url) for url in property_urls]
+            results = await asyncio.gather(*tasks)
             
-            # Filter out None values and exceptions
-            valid_properties = []
-            for prop in properties:
-                if isinstance(prop, Property):
-                    valid_properties.append(prop)
-                elif isinstance(prop, Exception):
-                    logger.error(f"Error during scraping: {str(prop)}")
+            # Filter out None results
+            valid_properties = [p for p in results if p is not None]
+            all_properties.extend(valid_properties)
             
-            return valid_properties
-            
-        finally:
-            await self.close_session()
-    
-    def save_to_json(self, properties: List[Property], filename: str = "properties.json"):
-        """Save properties to JSON file"""
-        data = [asdict(prop) for prop in properties]
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info(f"Saved {len(properties)} properties to {filename}")
-    
-    def save_to_csv(self, properties: List[Property], filename: str = "properties.csv"):
-        """Save properties to CSV file"""
-        if not properties:
-            return
+            logger.info(f"Successfully scraped {len(valid_properties)} properties from page {page_num}")
         
-        # Flatten data for CSV
-        rows = []
-        for prop in properties:
-            base_data = {
-                'property_name': prop.property_name,
-                'street_num': prop.street_num,
-                'address': prop.address,
-                'avg_price_per_sqft': prop.metrics.avg_price_per_sqft,
-                'avg_rent': prop.metrics.avg_rent,
-                'avg_return': prop.metrics.avg_return,
-                'property_url': prop.property_url,
-                'scraped_at': prop.scraped_at,
-                'transaction_count': len(prop.transactions)
-            }
-            rows.append(base_data)
-        
-        # Write properties CSV
-        with open(filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-            writer.writeheader()
-            writer.writerows(rows)
-        
-        # Write transactions CSV
-        trans_filename = filename.replace('.csv', '_transactions.csv')
-        trans_rows = []
-        for prop in properties:
-            for trans in prop.transactions:
-                trans_data = asdict(trans)
-                trans_rows.append(trans_data)
-        
-        if trans_rows:
-            with open(trans_filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=trans_rows[0].keys())
-                writer.writeheader()
-                writer.writerows(trans_rows)
-        
-        logger.info(f"Saved data to {filename} and {trans_filename}")
+        return all_properties
 
 async def main():
-    # Configuration with proxy support
-    config = {
-        'max_concurrent': 10,  # Higher concurrency with async
-        'delay': 0.5,          # Shorter delay possible with async
-        'timeout': 30,
+    """Example usage"""
+    # Set the number of pages to scrape
+    MAX_PAGES = 2  # Adjust as needed
+    
+    async with HSE28Scraper(max_pages=MAX_PAGES, max_concurrent_requests=5) as scraper:
+        properties = await scraper.scrape_all()
         
-        # Proxy configuration (uncomment and modify as needed)
-        # 'proxy': 'http://proxy.company.com:8080',
-        # 'proxy_auth': ('username', 'password'),  # If authentication required
-    }
-    
-    # Initialize scraper
-    scraper = AsyncHSE28Scraper(**config)
-    
-    # URL to scrape
-    list_url = "https://www.28hse.com/en/estate/"
-    
-    # Scrape all properties
-    logger.info("Starting async scraping process...")
-    start_time = time.time()
-    
-    properties = await scraper.scrape_all_properties(list_url)
-    
-    elapsed_time = time.time() - start_time
-    
-    # Save results
-    if properties:
-        scraper.save_to_json(properties, "28hse_properties.json")
-        scraper.save_to_csv(properties, "28hse_properties.csv")
+        # Convert to JSON-serializable format
+        data = []
+        for prop in properties:
+            prop_dict = asdict(prop)
+            data.append(prop_dict)
+        
+        # Save to JSON file
+        with open('28hse_properties.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
         
         # Print summary
+        print(f"\nScraped {len(properties)} properties")
         total_transactions = sum(len(p.transactions) for p in properties)
-        logger.info(f"\nScraping completed in {elapsed_time:.2f} seconds!")
-        logger.info(f"Total properties: {len(properties)}")
-        logger.info(f"Total transactions: {total_transactions}")
-        logger.info(f"Average time per property: {elapsed_time/len(properties):.2f} seconds")
-    else:
-        logger.error("No properties were scraped successfully")
-
-# Example usage with different proxy configurations
-async def example_with_proxy():
-    # HTTP proxy without authentication
-    scraper1 = AsyncHSE28Scraper(
-        proxy='http://proxy.company.com:8080',
-        max_concurrent=5
-    )
-    
-    # HTTP proxy with authentication
-    scraper2 = AsyncHSE28Scraper(
-        proxy='http://proxy.company.com:8080',
-        proxy_auth=('username', 'password'),
-        max_concurrent=5
-    )
-    
-    # SOCKS proxy (requires aiohttp-socks)
-    # scraper3 = AsyncHSE28Scraper(
-    #     proxy='socks5://proxy.company.com:1080',
-    #     proxy_auth=('username', 'password')
-    # )
-    
-    list_url = "https://www.28hse.com/en/estate/"
-    properties = await scraper1.scrape_all_properties(list_url)
-    return properties
+        print(f"Total transactions: {total_transactions}")
+        
+        # Print sample data
+        if properties:
+            print(f"\nSample property:")
+            print(f"Name: {properties[0].property_name}")
+            print(f"Address: {properties[0].street_num}, {properties[0].address}")
+            print(f"Metrics: {properties[0].metrics}")
+            print(f"Transactions: {len(properties[0].transactions)}")
 
 if __name__ == "__main__":
-    # Install required packages:
-    # pip install aiohttp beautifulsoup4 certifi
-    
-    # Run the main scraper
     asyncio.run(main())
-    
-    # Or run with proxy
-    # asyncio.run(example_with_proxy())
