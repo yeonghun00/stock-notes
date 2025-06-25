@@ -1,523 +1,135 @@
-import asyncio
-import aiohttp
-from bs4 import BeautifulSoup
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
-import re
-import json
-import csv
-from urllib.parse import urljoin, urlparse
-import logging
+# Omnia Dashboard Data Download Guidelines
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+## Overview
+This guide provides step-by-step instructions for downloading consolidated data from the Omnia Site Customer Dashboard before executing the Python main.py script. **Manual download is required until automation features become available.**
 
-@dataclass
-class PropertyMetrics:
-    """Store property metrics with None defaults for missing data"""
-    avg_price_per_sqft: Optional[float] = None
-    avg_rent: Optional[float] = None
-    avg_return: Optional[float] = None
+---
 
-@dataclass
-class Transaction:
-    """Store individual transaction data"""
-    property_name: str = ""  # Add property name for better CSV output
-    unit: str = ""
-    address: str = ""
-    sold_price: float = 0
-    registry_date: str = ""
-    saleable_area: int = 0
-    unit_price: float = 0
-    bedrooms: Optional[int] = None
-    transaction_format: str = "Land Registry"
+## Prerequisites
+- Access to Omnia Site Customer Dashboard
+- Access to Omnia Qliksense Dashboard
+- Bookmark the dashboard for efficient repeated access
 
-@dataclass
-class Property:
-    """Main property data structure"""
-    property_name: str
-    street_num: str
-    address: str
-    detail_url: str
-    metrics: PropertyMetrics = field(default_factory=PropertyMetrics)
-    transactions: List[Transaction] = field(default_factory=list)
+---
 
-class HSE28Scraper:
-    def __init__(self, max_pages: int = 5, max_concurrent_requests: int = 5):
-        """
-        Initialize the scraper
-        
-        Args:
-            max_pages: Maximum pages to scrape (applies to both property and transaction listings)
-            max_concurrent_requests: Maximum concurrent HTTP requests
-        """
-        self.base_url = "https://www.28hse.com"
-        self.max_pages = max_pages
-        self.max_concurrent_requests = max_concurrent_requests
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.semaphore: Optional[asyncio.Semaphore] = None
-        
-    async def __aenter__(self):
-        """Async context manager entry"""
-        self.session = aiohttp.ClientSession()
-        self.semaphore = asyncio.Semaphore(self.max_concurrent_requests)
-        return self
-        
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
-        if self.session:
-            await self.session.close()
-    
-    async def fetch_page(self, url: str) -> Optional[str]:
-        """Fetch a page with rate limiting and error handling"""
-        async with self.semaphore:
-            try:
-                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status == 200:
-                        return await response.text()
-                    else:
-                        logger.error(f"Failed to fetch {url}: Status {response.status}")
-                        return None
-            except Exception as e:
-                logger.error(f"Error fetching {url}: {str(e)}")
-                return None
-    
-    def parse_number(self, text: str) -> Optional[float]:
-        """Extract number from text, handling various formats"""
-        if not text:
-            return None
-        
-        # Remove currency symbols and common text
-        text = re.sub(r'[HKD$,]', '', text)
-        text = re.sub(r'Millions?', '000000', text, flags=re.IGNORECASE)
-        
-        # Find number pattern
-        match = re.search(r'[\d.]+', text)
-        if match:
-            try:
-                return float(match.group())
-            except ValueError:
-                return None
-        return None
-    
-    async def parse_listing_page(self, html: str) -> List[str]:
-        """Parse property URLs from listing page"""
-        soup = BeautifulSoup(html, 'html.parser')
-        property_urls = []
-        
-        # Find property links
-        property_links = soup.select('a[href*="/estate/detail/"]')
-        
-        # Also try alternative selectors
-        if not property_links:
-            property_links = soup.select('a.estate-link, a.property-link, .estate-item a')
-        
-        for link in property_links:
-            href = link.get('href')
-            if href and '/estate/detail/' in href:
-                # Skip sub-pages
-                if any(sub in href for sub in ['/transaction', '/photo', '/floor-plan']):
-                    continue
-                    
-                full_url = urljoin(self.base_url, href)
-                if full_url not in property_urls:
-                    property_urls.append(full_url)
-        
-        logger.info(f"Found {len(property_urls)} unique property URLs")
-        return property_urls
-    
-    async def parse_property_details(self, html: str, url: str) -> Optional[Property]:
-        """Parse property details from detail page"""
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        try:
-            # Extract property name
-            property_name = ""
-            name_selectors = ['h1', '.property-name', '.estate-name', '[class*="title"]']
-            for selector in name_selectors:
-                elem = soup.select_one(selector)
-                if elem and elem.text.strip():
-                    property_name = elem.text.strip()
-                    break
-            
-            if not property_name:
-                logger.warning(f"Could not find property name for {url}")
-                return None
-            
-            # Extract street number
-            street_num = ""
-            street_elem = soup.select_one('a[href="#estate_id_map"]')
-            if street_elem:
-                street_num = street_elem.text.strip()
-            
-            # Extract address from breadcrumbs
-            address = ""
-            breadcrumb_items = soup.select('a[itemprop="item"] span[itemprop="name"]')
-            if breadcrumb_items:
-                address_parts = [item.text.strip() for item in breadcrumb_items if item.text.strip()]
-                filtered_parts = [part for part in address_parts if part not in ['Home', 'Estate', 'Property']]
-                address = ' > '.join(filtered_parts)
-            
-            # Create property object
-            property_obj = Property(
-                property_name=property_name,
-                street_num=street_num,
-                address=address,
-                detail_url=url
-            )
-            
-            # Extract metrics
-            metrics_data = {}
-            text_content = soup.get_text()
-            
-            # Average price per sqft
-            price_match = re.search(r'([\d,]+)\s*(?:Avg\.?\s*)?price\s*per\s*sqft', text_content, re.IGNORECASE)
-            if price_match:
-                metrics_data['avg_price_per_sqft'] = self.parse_number(price_match.group(1))
-            
-            # Average rent
-            rent_match = re.search(r'([\d.]+)\s*(?:Avg\.?\s*)?rent', text_content, re.IGNORECASE)
-            if rent_match:
-                metrics_data['avg_rent'] = self.parse_number(rent_match.group(1))
-            
-            # Average return
-            return_match = re.search(r'([\d.]+)%?\s*(?:Avg\.?\s*)?return', text_content, re.IGNORECASE)
-            if return_match:
-                metrics_data['avg_return'] = self.parse_number(return_match.group(1))
-            
-            property_obj.metrics = PropertyMetrics(**metrics_data)
-            
-            return property_obj
-            
-        except Exception as e:
-            logger.error(f"Error parsing property details from {url}: {str(e)}")
-            return None
-    
-    async def parse_transaction_listing_page(self, html: str) -> List[str]:
-        """Parse individual transaction URLs from transaction listing page"""
-        soup = BeautifulSoup(html, 'html.parser')
-        transaction_urls = []
-        
-        # Find all transaction detail links
-        detail_links = soup.select('a.detail_page[href*="/transaction/deal-"]')
-        
-        for link in detail_links:
-            href = link.get('href')
-            if href:
-                full_url = urljoin(self.base_url, href)
-                if full_url not in transaction_urls:
-                    transaction_urls.append(full_url)
-        
-        logger.info(f"Found {len(transaction_urls)} transaction URLs on this page")
-        return transaction_urls
-    
-    async def parse_single_transaction(self, html: str, url: str, property_name: str) -> Optional[Transaction]:
-        """Parse a single transaction from its detail page"""
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        try:
-            # Extract unit info from title/header
-            unit = ""
-            header = soup.find('h1') or soup.find('title')
-            if header:
-                header_text = header.get_text(strip=True)
-                unit_match = re.search(r'(Flat|Unit|Room)\s+[A-Z0-9]+[,\s]+[\d/]+F[,\s]+(Tower|Block|Building)?\s*[A-Z0-9]*', 
-                                     header_text, re.IGNORECASE)
-                if unit_match:
-                    unit = unit_match.group(0).strip()
-            
-            # Initialize transaction
-            trans = Transaction(property_name=property_name)
-            trans.unit = unit
-            
-            # Find table with transaction details
-            info_table = soup.find('table')
-            
-            if info_table:
-                rows = info_table.find_all('tr')
-                for row in rows:
-                    cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 2:
-                        label = cells[0].get_text(strip=True)
-                        value = cells[1].get_text(strip=True)
-                        
-                        if 'Address' in label or 'Location' in label:
-                            trans.address = value
-                        elif 'Sold Price' in label:
-                            price_match = re.search(r'([\d.]+)\s*M(?:illion)?', value, re.IGNORECASE)
-                            if price_match:
-                                trans.sold_price = float(price_match.group(1)) * 1000000
-                            else:
-                                num_match = re.search(r'[\d,]+', value)
-                                if num_match:
-                                    trans.sold_price = float(num_match.group(0).replace(',', ''))
-                        elif 'Registry Date' in label:
-                            trans.registry_date = value
-                        elif 'Saleable area' in label:
-                            area_match = re.search(r'([\d,]+)', value)
-                            if area_match:
-                                trans.saleable_area = int(area_match.group(1).replace(',', ''))
-                        elif 'Unit Price' in label and 'Building' not in label:
-                            price_match = re.search(r'([\d,]+)', value)
-                            if price_match:
-                                trans.unit_price = float(price_match.group(1).replace(',', ''))
-                        elif 'Bedroom' in label:
-                            bed_match = re.search(r'(\d+)', value)
-                            if bed_match:
-                                trans.bedrooms = int(bed_match.group(1))
-                        elif 'Transaction Format' in label:
-                            trans.transaction_format = value
-            
-            # Only return if we have essential data
-            if trans.sold_price > 0 or trans.saleable_area > 0:
-                return trans
-            else:
-                logger.warning(f"No valid transaction data found at {url}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error parsing transaction from {url}: {str(e)}")
-            return None
-    
-    async def scrape_all_transactions(self, transaction_base_url: str, property_name: str) -> List[Transaction]:
-        """Scrape all transactions for a property with pagination"""
-        all_transactions = []
-        all_transaction_urls = []
-        page_limit = self.max_pages if self.max_pages else 100  # Default max if None
-        
-        # Scrape transaction listing pages
-        for page_num in range(1, page_limit + 1):
-            if page_num == 1:
-                list_url = transaction_base_url
-            else:
-                list_url = f"{transaction_base_url}?page={page_num}"
-            
-            logger.info(f"Fetching transaction listing page {page_num} for {property_name}")
-            html = await self.fetch_page(list_url)
-            
-            if not html:
-                logger.warning(f"Failed to fetch transaction listing page {page_num}")
-                break
-            
-            # Get transaction URLs from this page
-            transaction_urls = await self.parse_transaction_listing_page(html)
-            
-            if not transaction_urls:
-                logger.info("No more transactions found")
-                break
-                
-            all_transaction_urls.extend(transaction_urls)
-            
-            # Check if there's a next page
-            if self.max_pages is None:
-                soup = BeautifulSoup(html, 'html.parser')
-                next_link = soup.find('a', text=re.compile('Next|›|»'))
-                if not next_link or 'disabled' in next_link.get('class', []):
-                    break
-        
-        logger.info(f"Total transaction URLs collected: {len(all_transaction_urls)}")
-        
-        # Scrape each individual transaction
-        tasks = []
-        for url in all_transaction_urls:
-            task = self.fetch_and_parse_transaction(url, property_name)
-            tasks.append(task)
-        
-        results = await asyncio.gather(*tasks)
-        all_transactions = [t for t in results if t is not None]
-        
-        return all_transactions
-    
-    async def fetch_and_parse_transaction(self, url: str, property_name: str) -> Optional[Transaction]:
-        """Fetch and parse a single transaction page"""
-        html = await self.fetch_page(url)
-        if html:
-            return await self.parse_single_transaction(html, url, property_name)
-        return None
-    
-    async def scrape_property_with_transactions(self, property_url: str) -> Optional[Property]:
-        """Scrape a property and its transactions"""
-        # Fetch property details
-        html = await self.fetch_page(property_url)
-        if not html:
-            return None
-        
-        property_obj = await self.parse_property_details(html, property_url)
-        if not property_obj:
-            return None
-        
-        # Extract property ID from URL
-        property_id_match = re.search(r'/estate/detail/([^/]+?)(?:-(\d+))?/?$', property_url)
-        if property_id_match:
-            property_slug = property_id_match.group(1)
-            property_id = property_id_match.group(2) or ""
-            
-            # Construct transaction URL
-            if property_id:
-                transaction_url = f"{self.base_url}/en/estate/detail/{property_slug}-{property_id}/transaction"
-            else:
-                transaction_url = f"{self.base_url}/en/estate/detail/{property_slug}/transaction"
-            
-            # Scrape all transactions
-            property_obj.transactions = await self.scrape_all_transactions(
-                transaction_url, 
-                property_obj.property_name
-            )
-            logger.info(f"Found {len(property_obj.transactions)} transactions for {property_obj.property_name}")
-        
-        return property_obj
-    
-    async def scrape_all(self) -> List[Property]:
-        """Main scraping method"""
-        all_properties = []
-        
-        # Scrape listing pages
-        for page_num in range(1, self.max_pages + 1):
-            if page_num == 1:
-                list_url = f"{self.base_url}/en/estate/"
-            else:
-                list_url = f"{self.base_url}/en/estate/?page={page_num}"
-            
-            logger.info(f"Scraping listing page {page_num}")
-            html = await self.fetch_page(list_url)
-            
-            if not html:
-                logger.warning(f"Failed to fetch listing page {page_num}")
-                continue
-            
-            property_urls = await self.parse_listing_page(html)
-            logger.info(f"Found {len(property_urls)} properties on page {page_num}")
-            
-            if not property_urls:
-                break
-            
-            # Scrape each property
-            tasks = [self.scrape_property_with_transactions(url) for url in property_urls]
-            results = await asyncio.gather(*tasks)
-            
-            valid_properties = [p for p in results if p is not None]
-            all_properties.extend(valid_properties)
-            
-            logger.info(f"Successfully scraped {len(valid_properties)} properties from page {page_num}")
-        
-        return all_properties
+## Download Configuration Settings
 
-def save_to_csv(properties: List[Property], properties_filename: str = "properties.csv", 
-                transactions_filename: str = "transactions.csv"):
-    """Save properties and transactions to CSV files"""
-    
-    # Save properties to CSV
-    with open(properties_filename, 'w', newline='', encoding='utf-8') as f:
-        fieldnames = [
-            'property_name', 'street_num', 'address', 'detail_url',
-            'avg_price_per_sqft', 'avg_rent', 'avg_return', 'total_transactions'
-        ]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        for prop in properties:
-            row = {
-                'property_name': prop.property_name,
-                'street_num': prop.street_num,
-                'address': prop.address,
-                'detail_url': prop.detail_url,
-                'avg_price_per_sqft': prop.metrics.avg_price_per_sqft or '',
-                'avg_rent': prop.metrics.avg_rent or '',
-                'avg_return': prop.metrics.avg_return or '',
-                'total_transactions': len(prop.transactions)
-            }
-            writer.writerow(row)
-    
-    # Save transactions to CSV
-    with open(transactions_filename, 'w', newline='', encoding='utf-8') as f:
-        fieldnames = [
-            'property_name', 'unit', 'address', 'sold_price_hkd', 'sold_price_millions',
-            'registry_date', 'saleable_area_sqft', 'unit_price_per_sqft', 
-            'bedrooms', 'transaction_format'
-        ]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        for prop in properties:
-            for trans in prop.transactions:
-                row = {
-                    'property_name': trans.property_name,
-                    'unit': trans.unit,
-                    'address': trans.address,
-                    'sold_price_hkd': trans.sold_price,
-                    'sold_price_millions': f"{trans.sold_price/1000000:.2f}" if trans.sold_price > 0 else '',
-                    'registry_date': trans.registry_date,
-                    'saleable_area_sqft': trans.saleable_area or '',
-                    'unit_price_per_sqft': trans.unit_price or '',
-                    'bedrooms': trans.bedrooms or '',
-                    'transaction_format': trans.transaction_format
-                }
-                writer.writerow(row)
+### Basic Settings
+- **Currency:** USD
+- **Unit:** $K
+- **Column Order:** Critical - Must follow specified sequence
 
-async def main():
-    """
-    Example usage of the HSE28 scraper
-    
-    The scraper works in these steps:
-    1. Scrapes property listing pages (up to max_pages)
-    2. For each property, gets details (name, address, metrics)
-    3. Goes to property's transaction listing page
-    4. Paginates through transaction listings (up to max_pages)
-    5. Visits each individual transaction page for full details
-    """
-    # Configuration
-    MAX_PAGES = 2  # Applies to BOTH property AND transaction listings
-    
-    async with HSE28Scraper(max_pages=MAX_PAGES, max_concurrent_requests=5) as scraper:
-        properties = await scraper.scrape_all()
-        
-        # Save to JSON
-        data = []
-        for prop in properties:
-            prop_dict = asdict(prop)
-            data.append(prop_dict)
-        
-        with open('28hse_properties.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        # Save to CSV
-        save_to_csv(properties, 'properties.csv', 'transactions.csv')
-        
-        # Print summary
-        print(f"\n=== SCRAPING SUMMARY ===")
-        print(f"Total properties scraped: {len(properties)}")
-        total_transactions = sum(len(p.transactions) for p in properties)
-        print(f"Total transactions: {total_transactions}")
-        print(f"\nFiles saved:")
-        print(f"  - 28hse_properties.json (complete data)")
-        print(f"  - properties.csv (property summary)")
-        print(f"  - transactions.csv (all transactions)")
-        
-        # Show sample data
-        if properties:
-            print(f"\n=== SAMPLE PROPERTY ===")
-            sample = properties[0]
-            print(f"Name: {sample.property_name}")
-            print(f"Street: {sample.street_num}")
-            print(f"Address: {sample.address}")
-            print(f"URL: {sample.detail_url}")
-            print(f"Avg Price/sqft: ${sample.metrics.avg_price_per_sqft or 'N/A'}")
-            print(f"Avg Rent: ${sample.metrics.avg_rent or 'N/A'}")
-            print(f"Avg Return: {sample.metrics.avg_return or 'N/A'}%")
-            print(f"Total Transactions: {len(sample.transactions)}")
-            
-            if sample.transactions:
-                print(f"\n=== FIRST 3 TRANSACTIONS ===")
-                for i, trans in enumerate(sample.transactions[:3], 1):
-                    print(f"\nTransaction {i}:")
-                    print(f"  Unit: {trans.unit}")
-                    print(f"  Price: HKD${trans.sold_price:,.0f} (${trans.sold_price/1000000:.2f}M)")
-                    print(f"  Date: {trans.registry_date}")
-                    print(f"  Area: {trans.saleable_area} sqft")
-                    print(f"  Unit Price: ${trans.unit_price:,.0f}/sqft")
-                    print(f"  Bedrooms: {trans.bedrooms or 'N/A'}")
+### Data Parameters
 
-if __name__ == "__main__":
-    asyncio.run(main())
+#### 1. Revenue Types (5 variations)
+| Revenue Type | Configuration Settings |
+|-------------|----------------------|
+| **InBound** | Booking Country: Hong Kong |
+| **OutBound** | Managed Country: Hong Kong |
+| **InCountry** | Managed Country: Hong Kong |
+| **RRM_OutBound** | RRM Country: Hong Kong, Managed Country, Booking Country: Exclude Hong Kong |
+| **RRM_InCountry** | RRM Country: Hong Kong |
+
+#### 2. YTD/MTD Flags (2 variations)
+- **MTD** (Month-to-Date)
+- **YTD** (Year-to-Date)
+
+#### 3. Period Settings (3 variations)
+- **Current Period:** {Current Year}{Current Month} *(e.g., 202505)*
+- **Previous Year Same Month:** {Last Year}{Current Month} *(e.g., 202405)*
+- **Previous Year End:** {Last Year}12 *(e.g., 202412)*
+
+---
+
+## Download Requirements
+
+### Total Files Required
+**30 Files** = 5 Revenue Types × 2 YTD/MTD Flags × 3 Periods
+
+### File Naming Convention
+**Format:** `AMH_{RevenueType}_{YTD_MTD_FLAG}_{Period}.xlsx`
+
+**Example:** `AMH_RRM_OutBound_YTD_202504.xlsx`
+
+---
+
+## Column Configuration
+
+### Required Column Sequence
+The following columns must be downloaded in **exact order**:
+
+1. Period
+2. Internal MG ID
+3. Mastergroup
+4. Site Customer Name
+5. Site Customer Number
+6. GBM Product Name
+7. Horis Product Name
+8. Site Product Name
+9. Site Product Code
+10. Segment
+11. Sector
+12. Managed Country
+13. RRM Country
+14. Booking Country
+15. PRM Name
+16. PRM Staff ID
+17. RRM Name
+18. RRM Staff ID
+19. LRM Name
+20. LRM Staff ID
+21. Avg asset balance
+22. Avg liability balance
+23. Net Interest Income
+24. TRI(Pre LP)
+
+### Column Source Configuration
+- **Dimensions:** Columns 1-20
+- **Measures:** Columns 21-24 (Avg asset balance, Avg liability balance, Net Interest Income, TRI(Pre LP))
+
+---
+
+## Step-by-Step Download Process
+
+### Step 1: Access Dashboard
+1. Navigate to Omnia Site Customer Dashboard
+2. Access Qliksense Dashboard section
+
+### Step 2: Configure Settings
+1. Set Currency to **USD**
+2. Set Unit to **$K**
+3. Configure Revenue Type according to specifications
+4. Set YTD/MTD Flag
+5. Set Period parameters
+
+### Step 3: Column Setup
+1. Add Dimensions (columns 1-20) in specified order
+2. Add Measures (columns 21-24) in specified order
+
+### Step 4: Export Data
+1. Export as Excel (.xlsx format)
+2. Save with proper naming convention
+3. Repeat for all 30 file combinations
+
+### Step 5: Execute Python Script
+Once all 30 files are downloaded and properly named, execute `main.py` to generate consolidated output.
+
+---
+
+## Important Notes
+- ⚠️ **File naming is critical** - Incorrect naming will cause script failure
+- 📋 **Column order must be exact** - Any deviation will affect data processing
+- 🔖 **Bookmark dashboard** for efficiency during manual download period
+- ✅ **Verify all 30 files** are downloaded before running Python script
+
+---
+
+## Troubleshooting
+- **Missing files:** Ensure all 30 combinations are downloaded
+- **Naming errors:** Double-check file naming convention
+- **Column issues:** Verify column sequence matches specifications
+- **Data inconsistency:** Confirm currency and unit settings
+
+---
+
+*This process will be automated in future releases. Until then, manual download following these guidelines is required.*
