@@ -1,135 +1,195 @@
-# Omnia Dashboard Data Download Guidelines
+import asyncio
+import aiohttp
+import feedparser
+import json
+import csv
+import logging
+from bs4 import BeautifulSoup
+from typing import List, Dict, Optional, Any
 
-## Overview
-This guide provides step-by-step instructions for downloading consolidated data from the Omnia Site Customer Dashboard before executing the Python main.py script. **Manual download is required until automation features become available.**
+# --- Configuration ---
+# List of keywords you want to search for.
+KEYWORDS: List[str] = [
+    "geopolitical risk",
+    "supply chain disruption",
+    "quantum computing breakthrough",
+    "AI regulation",
+    "carbon capture technology"
+]
 
----
+# Google News RSS feed URL template.
+# %s will be replaced with the URL-encoded keyword.
+# when:3d searches for news in the last 3 days.
+GOOGLE_NEWS_URL_TEMPLATE: str = "https://news.google.com/rss/search?q=%s+when:3d&hl=en-US&gl=US&ceid=US:en"
 
-## Prerequisites
-- Access to Omnia Site Customer Dashboard
-- Access to Omnia Qliksense Dashboard
-- Bookmark the dashboard for efficient repeated access
+# --- Output Files ---
+JSON_OUTPUT_FILE: str = "news_results.json"
+CSV_OUTPUT_FILE: str = "news_results.csv"
 
----
+# --- Advanced Configuration ---
+# Set a User-Agent to mimic a real browser, reducing the chance of being blocked.
+HEADERS: Dict[str, str] = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
+# Timeout for each HTTP request in seconds.
+REQUEST_TIMEOUT: int = 15
+# Configure logging to see progress and errors.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-## Download Configuration Settings
 
-### Basic Settings
-- **Currency:** USD
-- **Unit:** $K
-- **Column Order:** Critical - Must follow specified sequence
+async def fetch_url_content(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    """
+    Asynchronously fetches content from a given URL.
 
-### Data Parameters
+    Args:
+        session: The aiohttp client session.
+        url: The URL to fetch.
 
-#### 1. Revenue Types (5 variations)
-| Revenue Type | Configuration Settings |
-|-------------|----------------------|
-| **InBound** | Booking Country: Hong Kong |
-| **OutBound** | Managed Country: Hong Kong |
-| **InCountry** | Managed Country: Hong Kong |
-| **RRM_OutBound** | RRM Country: Hong Kong, Managed Country, Booking Country: Exclude Hong Kong |
-| **RRM_InCountry** | RRM Country: Hong Kong |
+    Returns:
+        The text content of the response, or None if an error occurs.
+    """
+    try:
+        async with session.get(url, timeout=REQUEST_TIMEOUT, headers=HEADERS) as response:
+            # Raise an exception for bad status codes (4xx or 5xx).
+            response.raise_for_status()
+            logging.info(f"Successfully fetched {response.url}")
+            return await response.text()
+    except aiohttp.ClientError as e:
+        logging.error(f"Aiohttp client error fetching {url}: {e}")
+    except asyncio.TimeoutError:
+        logging.error(f"Timeout error fetching {url}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred fetching {url}: {e}")
+    return None
 
-#### 2. YTD/MTD Flags (2 variations)
-- **MTD** (Month-to-Date)
-- **YTD** (Year-to-Date)
+async def verify_article_match(
+    session: aiohttp.ClientSession,
+    entry: Dict[str, Any],
+    keyword: str
+) -> Optional[Dict[str, str]]:
+    """
+    Visits a single article page and checks if the keyword exists in its content.
 
-#### 3. Period Settings (3 variations)
-- **Current Period:** {Current Year}{Current Month} *(e.g., 202505)*
-- **Previous Year Same Month:** {Last Year}{Current Month} *(e.g., 202405)*
-- **Previous Year End:** {Last Year}12 *(e.g., 202412)*
+    Args:
+        session: The aiohttp client session.
+        entry: A parsed feed entry from feedparser.
+        keyword: The keyword to search for within the article content.
 
----
+    Returns:
+        A dictionary with article details if the keyword is found, otherwise None.
+    """
+    article_url = entry.get("link")
+    if not article_url:
+        return None
 
-## Download Requirements
+    html_content = await fetch_url_content(session, article_url)
+    if not html_content:
+        return None
 
-### Total Files Required
-**30 Files** = 5 Revenue Types × 2 YTD/MTD Flags × 3 Periods
+    try:
+        soup = BeautifulSoup(html_content, 'lxml') # 'lxml' is a fast parser
+        # Get all text from the body and search for the keyword (case-insensitive)
+        body_text = soup.body.get_text().lower()
+        if keyword.lower() in body_text:
+            logging.info(f"MATCH FOUND for '{keyword}' in: {article_url}")
+            return {
+                "keyword": keyword,
+                "title": entry.get("title", "N/A"),
+                "link": article_url,
+                "published": entry.get("published", "N/A"),
+                "source": entry.get("source", {}).get("title", "N/A"),
+            }
+    except Exception as e:
+        logging.error(f"Error parsing article {article_url}: {e}")
 
-### File Naming Convention
-**Format:** `AMH_{RevenueType}_{YTD_MTD_FLAG}_{Period}.xlsx`
+    return None
 
-**Example:** `AMH_RRM_OutBound_YTD_202504.xlsx`
+async def process_keyword(session: aiohttp.ClientSession, keyword: str) -> List[Dict[str, str]]:
+    """
+    Processes a single keyword: fetches the Google News RSS feed and
+    verifies each article for a keyword match concurrently.
 
----
+    Args:
+        session: The aiohttp client session.
+        keyword: The keyword to process.
 
-## Column Configuration
+    Returns:
+        A list of verified articles that contain the keyword.
+    """
+    logging.info(f"--- Processing keyword: '{keyword}' ---")
+    # URL-encode the keyword for the query parameter
+    search_url = GOOGLE_NEWS_URL_TEMPLATE % keyword.replace(" ", "%20")
+    
+    rss_content = await fetch_url_content(session, search_url)
+    if not rss_content:
+        return []
 
-### Required Column Sequence
-The following columns must be downloaded in **exact order**:
+    # feedparser handles the XML parsing
+    feed = feedparser.parse(rss_content)
+    if not feed.entries:
+        logging.warning(f"No articles found in RSS feed for keyword: '{keyword}'")
+        return []
 
-1. Period
-2. Internal MG ID
-3. Mastergroup
-4. Site Customer Name
-5. Site Customer Number
-6. GBM Product Name
-7. Horis Product Name
-8. Site Product Name
-9. Site Product Code
-10. Segment
-11. Sector
-12. Managed Country
-13. RRM Country
-14. Booking Country
-15. PRM Name
-16. PRM Staff ID
-17. RRM Name
-18. RRM Staff ID
-19. LRM Name
-20. LRM Staff ID
-21. Avg asset balance
-22. Avg liability balance
-23. Net Interest Income
-24. TRI(Pre LP)
+    # Create a list of concurrent tasks to verify each article
+    tasks = [verify_article_match(session, entry, keyword) for entry in feed.entries]
+    
+    # Run all verification tasks concurrently and wait for them to complete
+    verified_articles_results = await asyncio.gather(*tasks)
+    
+    # Filter out the None results (where no match was found)
+    return [article for article in verified_articles_results if article]
 
-### Column Source Configuration
-- **Dimensions:** Columns 1-20
-- **Measures:** Columns 21-24 (Avg asset balance, Avg liability balance, Net Interest Income, TRI(Pre LP))
+def save_as_json(data: List[Dict[str, str]], filename: str):
+    """Saves the final data to a JSON file."""
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    logging.info(f"Successfully saved {len(data)} articles to {filename}")
 
----
+def save_as_csv(data: List[Dict[str, str]], filename: str):
+    """Saves the final data to a CSV file."""
+    if not data:
+        logging.warning("No data to save to CSV.")
+        return
+        
+    # Use the keys from the first dictionary as headers
+    headers = data[0].keys()
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(data)
+    logging.info(f"Successfully saved {len(data)} articles to {filename}")
 
-## Step-by-Step Download Process
 
-### Step 1: Access Dashboard
-1. Navigate to Omnia Site Customer Dashboard
-2. Access Qliksense Dashboard section
+async def main():
+    """
+    Main asynchronous function to orchestrate the entire process.
+    """
+    all_found_articles = []
+    # aiohttp.ClientSession is used to manage connections efficiently
+    async with aiohttp.ClientSession() as session:
+        # Create a list of tasks for processing each keyword
+        keyword_tasks = [process_keyword(session, keyword) for keyword in KEYWORDS]
+        # Run all keyword processing tasks concurrently
+        results_per_keyword = await asyncio.gather(*keyword_tasks)
+        
+        # Flatten the list of lists into a single list of articles
+        all_found_articles = [article for sublist in results_per_keyword for article in sublist]
 
-### Step 2: Configure Settings
-1. Set Currency to **USD**
-2. Set Unit to **$K**
-3. Configure Revenue Type according to specifications
-4. Set YTD/MTD Flag
-5. Set Period parameters
+    if all_found_articles:
+        # Save the results to the specified file formats
+        save_as_json(all_found_articles, JSON_OUTPUT_FILE)
+        save_as_csv(all_found_articles, CSV_OUTPUT_FILE)
+    else:
+        logging.info("--- No matching articles found for any keywords. ---")
 
-### Step 3: Column Setup
-1. Add Dimensions (columns 1-20) in specified order
-2. Add Measures (columns 21-24) in specified order
+if __name__ == "__main__":
+    # This check ensures the code runs only when the script is executed directly
+    # It's standard practice in Python.
+    try:
+        # On Windows, you might need to set a different event loop policy
+        # for asyncio to work smoothly with aiohttp.
+        # asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(main())
+    except Exception as e:
+        logging.critical(f"A critical error occurred in the main execution block: {e}")
 
-### Step 4: Export Data
-1. Export as Excel (.xlsx format)
-2. Save with proper naming convention
-3. Repeat for all 30 file combinations
-
-### Step 5: Execute Python Script
-Once all 30 files are downloaded and properly named, execute `main.py` to generate consolidated output.
-
----
-
-## Important Notes
-- ⚠️ **File naming is critical** - Incorrect naming will cause script failure
-- 📋 **Column order must be exact** - Any deviation will affect data processing
-- 🔖 **Bookmark dashboard** for efficiency during manual download period
-- ✅ **Verify all 30 files** are downloaded before running Python script
-
----
-
-## Troubleshooting
-- **Missing files:** Ensure all 30 combinations are downloaded
-- **Naming errors:** Double-check file naming convention
-- **Column issues:** Verify column sequence matches specifications
-- **Data inconsistency:** Confirm currency and unit settings
-
----
-
-*This process will be automated in future releases. Until then, manual download following these guidelines is required.*
