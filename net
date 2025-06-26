@@ -5,7 +5,7 @@ import json
 import csv
 import logging
 from bs4 import BeautifulSoup
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 # --- Configuration ---
 # List of keywords you want to search for.
@@ -37,23 +37,27 @@ REQUEST_TIMEOUT: int = 15
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-async def fetch_url_content(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+async def fetch_url_content(session: aiohttp.ClientSession, url: str) -> Optional[Tuple[str, str]]:
     """
-    Asynchronously fetches content from a given URL.
+    Asynchronously fetches content from a given URL, handling redirects.
 
     Args:
         session: The aiohttp client session.
-        url: The URL to fetch.
+        url: The initial URL to fetch.
 
     Returns:
-        The text content of the response, or None if an error occurs.
+        A tuple containing the final URL (after redirects) and the text content,
+        or None if an error occurs.
     """
     try:
-        async with session.get(url, timeout=REQUEST_TIMEOUT, headers=HEADERS) as response:
+        async with session.get(url, timeout=REQUEST_TIMEOUT, headers=HEADERS, allow_redirects=True) as response:
             # Raise an exception for bad status codes (4xx or 5xx).
             response.raise_for_status()
-            logging.info(f"Successfully fetched {response.url}")
-            return await response.text()
+            # The 'response.url' attribute holds the final URL after redirects.
+            final_url = str(response.url)
+            logging.info(f"Successfully fetched {final_url} (from initial: {url})")
+            content = await response.text()
+            return final_url, content
     except aiohttp.ClientError as e:
         logging.error(f"Aiohttp client error fetching {url}: {e}")
     except asyncio.TimeoutError:
@@ -69,6 +73,7 @@ async def verify_article_match(
 ) -> Optional[Dict[str, str]]:
     """
     Visits a single article page and checks if the keyword exists in its content.
+    It now saves the final, redirected URL.
 
     Args:
         session: The aiohttp client session.
@@ -78,29 +83,36 @@ async def verify_article_match(
     Returns:
         A dictionary with article details if the keyword is found, otherwise None.
     """
-    article_url = entry.get("link")
-    if not article_url:
+    original_article_url = entry.get("link")
+    if not original_article_url:
         return None
 
-    html_content = await fetch_url_content(session, article_url)
-    if not html_content:
+    # fetch_url_content now returns a tuple: (final_url, content)
+    fetched_data = await fetch_url_content(session, original_article_url)
+    if not fetched_data:
         return None
+    
+    final_article_url, html_content = fetched_data # Unpack the tuple
 
     try:
-        soup = BeautifulSoup(html_content, 'lxml') # 'lxml' is a fast parser
-        # Get all text from the body and search for the keyword (case-insensitive)
+        soup = BeautifulSoup(html_content, 'lxml')
+        # Some pages might not have a body, so we check for it.
+        if soup.body is None:
+            logging.warning(f"No <body> tag found in {final_article_url}, skipping.")
+            return None
+            
         body_text = soup.body.get_text().lower()
         if keyword.lower() in body_text:
-            logging.info(f"MATCH FOUND for '{keyword}' in: {article_url}")
+            logging.info(f"MATCH FOUND for '{keyword}' in: {final_article_url}")
             return {
                 "keyword": keyword,
                 "title": entry.get("title", "N/A"),
-                "link": article_url,
+                "link": final_article_url,  # <-- CORRECTED: Using the final URL now
                 "published": entry.get("published", "N/A"),
                 "source": entry.get("source", {}).get("title", "N/A"),
             }
     except Exception as e:
-        logging.error(f"Error parsing article {article_url}: {e}")
+        logging.error(f"Error parsing article {final_article_url}: {e}")
 
     return None
 
@@ -120,9 +132,12 @@ async def process_keyword(session: aiohttp.ClientSession, keyword: str) -> List[
     # URL-encode the keyword for the query parameter
     search_url = GOOGLE_NEWS_URL_TEMPLATE % keyword.replace(" ", "%20")
     
-    rss_content = await fetch_url_content(session, search_url)
-    if not rss_content:
+    fetched_data = await fetch_url_content(session, search_url)
+    if not fetched_data:
         return []
+    
+    # For the RSS feed, we only need the content, not the final URL.
+    _rss_url, rss_content = fetched_data
 
     # feedparser handles the XML parsing
     feed = feedparser.parse(rss_content)
@@ -192,4 +207,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as e:
         logging.critical(f"A critical error occurred in the main execution block: {e}")
-
